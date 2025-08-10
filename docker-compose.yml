@@ -1,0 +1,158 @@
+version: '3.8'
+
+services:
+  # CozoDB is embedded in the Graphiti server (no separate service needed)
+  # CozoDB supports multiple engines: mem, sqlite, rocksdb
+
+  # Ollama for local LLM (free alternative)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: graphiti-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Graphiti MCP Server (Rust implementation with embedded CozoDB)
+  graphiti:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: graphiti-mcp-server
+    working_dir: /var/lib/graphiti/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      # LLM Configuration (using Ollama by default)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-not-needed-for-ollama}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+
+      # Embedding providers
+      - VOYAGE_API_KEY=${VOYAGE_API_KEY:-}
+      - COHERE_API_KEY=${COHERE_API_KEY:-}
+
+      # Server configuration
+      - RUST_LOG=info,graphiti=debug
+      - MCP_SERVER_PORT=8080
+      - MCP_SERVER_HOST=0.0.0.0
+
+      # Storage paths (CozoDB will use these)
+      - SEARCH_INDEX_PATH=/var/lib/graphiti/search
+      - VECTOR_INDEX_PATH=/var/lib/graphiti/vectors
+
+      # Feature flags
+      - ENABLE_DEDUPLICATION=true
+      - GENERATE_EMBEDDINGS=true
+    ports:
+      - "8080:8080"  # HTTP API and SSE endpoint
+    volumes:
+      - ./config.toml:/etc/graphiti/config.toml:ro
+      - ./config.free.toml:/etc/graphiti/config.free.toml:ro
+      - graphiti_search:/var/lib/graphiti/search
+      - graphiti_vectors:/var/lib/graphiti/vectors
+      - graphiti_data:/var/lib/graphiti/data
+      - cozo_data:/var/lib/graphiti/cozo  # CozoDB data directory
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    command: ["--config", "/etc/graphiti/config.toml", "--host", "0.0.0.0", "--port", "8080", "--project", "/var/lib/graphiti/data"]
+
+  # Optional: Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: graphiti-prometheus
+    profiles: ["monitoring"]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+
+  # Optional: Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: graphiti-grafana
+    profiles: ["monitoring"]
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+  # Optional: Free alternative setup using only Ollama and CozoDB (memory mode)
+  graphiti-free:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: graphiti-mcp-server-free
+    profiles: ["free"]
+    working_dir: /var/lib/graphiti/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      # Use Ollama for both LLM and embeddings, CozoDB in memory mode
+      - RUST_LOG=info,graphiti=debug
+      - MCP_SERVER_PORT=8091
+      - MCP_SERVER_HOST=0.0.0.0
+
+      # Storage paths
+      - SEARCH_INDEX_PATH=/var/lib/graphiti/search
+      - VECTOR_INDEX_PATH=/var/lib/graphiti/vectors
+
+      # Feature flags
+      - ENABLE_DEDUPLICATION=true
+      - GENERATE_EMBEDDINGS=true
+    ports:
+      - "8091:8091"  # Different port for free version
+    volumes:
+      - ./config.free.toml:/etc/graphiti/config.toml:ro
+      - graphiti_free_search:/var/lib/graphiti/search
+      - graphiti_free_vectors:/var/lib/graphiti/vectors
+      - graphiti_free_data:/var/lib/graphiti/data
+      - cozo_free_data:/var/lib/graphiti/cozo  # CozoDB data for free version
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8091/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    command: ["--config", "/etc/graphiti/config.toml", "--host", "0.0.0.0", "--port", "8091", "--project", "/var/lib/graphiti/data"]
+
+volumes:
+  ollama_data:
+  graphiti_search:
+  graphiti_vectors:
+  graphiti_data:
+  cozo_data:  # CozoDB data for main setup
+  graphiti_free_search:
+  graphiti_free_vectors:
+  graphiti_free_data:
+  cozo_free_data:  # CozoDB data for free setup
+  prometheus_data:
+  grafana_data:

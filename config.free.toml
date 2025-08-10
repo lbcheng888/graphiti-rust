@@ -1,0 +1,36 @@
+# Graphiti MCP Server Free Configuration (local-only, no API keys)
+
+[server]
+host = "0.0.0.0"
+port = 8091
+log_level = "info"
+
+[cozo]
+# Use in-memory for zero-setup; switch to rocksdb/sqlite for persistence
+engine = "mem"
+path = ""
+options = {}
+
+[llm]
+# LLM not required for core features; keep disabled to avoid downloads
+provider = "ollama"
+model = "disabled"
+
+[embedder]
+# Use Ollama embeddings to avoid heavy downloads
+provider = "ollama"
+model = "nomic-embed-text:latest"
+dimension = 768
+batch_size = 16
+
+[graphiti]
+name = "free"
+enable_deduplication = true
+min_entity_confidence = 0.6
+min_relationship_confidence = 0.5
+max_context_window = 4000
+generate_embeddings = true
+
+[storage]
+search_index_path = "./data/search"
+vector_index_path = "./data/vectors"

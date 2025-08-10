@@ -1,0 +1,26 @@
+# Learning system default configuration
+
+[enabled]
+value = true
+
+[detector]
+entity_novelty_threshold = 0.7
+relationship_novelty_threshold = 0.6
+enable_anomaly_detection = true
+enable_breakthrough_detection = true
+max_events_per_analysis = 5.deduplication_window_seconds = 300
+
+[notifications]
+# Placeholder config; actual defaults are in code
+channel = "console"
+
+[performance]
+max_concurrent_analyses = 4
+analysis_timeout_seconds = 30
+enable_caching = true
+cache_size = 1000
+cleanup_interval_seconds = 300
+
+[language_settings]
+supported_languages = ["rust", "python", "javascript", "typescript", "java", "cpp", "c", "go", "swift", "kotlin"]
+notification_language = "zh-CN"
