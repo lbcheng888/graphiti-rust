@@ -1,0 +1,21 @@
+{
+  "id": "F1",
+  "semantics": "search_facts",
+  "py": {
+    "tool": "search_memory_facts",
+    "args": {
+      "query": "Alice",
+      "limit": 5
+    }
+  },
+  "rs": {
+    "tool": "search_memory_facts",
+    "args": {
+      "query": "Alice",
+      "limit": 5
+    }
+  },
+  "policy": {
+    "if_missing_on_target": "partial_equivalence"
+  }
+}

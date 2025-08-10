@@ -1,0 +1,33 @@
+[package]
+name = "graphiti-prompts"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Local dependencies
+graphiti-core = { path = "../graphiti-core" }
+graphiti-llm = { path = "../graphiti-llm" }
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Utilities
+uuid.workspace = true
+chrono.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Template engine
+handlebars.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

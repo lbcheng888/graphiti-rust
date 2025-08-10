@@ -1,0 +1,56 @@
+# 示例：两个被测目标，均通过 stdio 提供 MCP JSON-RPC 接口
+# 若为端口型服务（HTTP/WebSocket），将 needs_port 设为 true，并在 env 或 cmd 中使用占位变量注入端口。
+
+# 评测目标配置：两个被测端均使用 MCP JSON-RPC (stdio)
+# 请将 target_b 的 cmd/cwd/env 替换为你实际的 Python 工具入口
+
+mcp_methods:
+  list: tools/list
+  call: tools/call
+
+# Rust 版 graphiti-mcp（stdio 模式）
+# 使用当前仓库根目录为工作目录，通过 cargo 以 release 启动
+# 如需固定项目目录隔离，可在 env 中设置 GRAPHITI_PROJECT 或在 cmd 追加 --project
+# 也可在 env 中设置 GRAPHITI_DB_PATH 指向临时数据库
+
+target_a:
+  name: graphiti_rs
+  cmd: ["cargo", "run", "--quiet", "--release", "-p", "graphiti-mcp", "--", "--stdio", "--log-level", "info"]
+  cwd: "graphiti-rust"
+  env: { "GRAPHITI_DB_PATH": "./.graphiti/test-eval.db", "RUST_LOG": "info" }
+  timeout_sec: 120
+  needs_port: false
+  port_env_key: PORT
+  ready_regex: null
+
+# Python 版 MCP 工具（占位，等待替换为真实命令）
+# 若 Python 侧为 HTTP/WebSocket 服务，请将 needs_port 设为 true 并在 cmd/env 中引用 ${PORT}
+# 示例（stdio）：
+#   cmd: ["python3", "-m", "your_mcp_module", "--stdio"]
+# 示例（HTTP）：
+#   cmd: ["python3", "-m", "your_http_server", "--port", "${PORT}"]
+#   needs_port: true
+
+target_b:
+  name: graphiti_py
+  cmd: ["python3", "-m", "http.server", "8001"]
+  cwd: "graphiti-rust"
+  env: {}
+  timeout_sec: 120
+  needs_port: false
+  port_env_key: PORT
+  ready_regex: null
+
+# 可选：Python SSE 网关（通过 mcp-remote 桥接），默认关闭
+python_sse:
+  name: python_sse
+  enabled: false
+  # 以 stdio 暴露 MCP，内部转发到下游 SSE 地址
+  # PORT 由评测框架分配注入，示例 SSE 路径为 /sse，可按需调整
+  cmd: ["mcp-remote", "--server-url", "http://127.0.0.1:${PORT}/sse"]
+  cwd: "."
+  env: {}
+  timeout_sec: 120
+  needs_port: true
+  port_env_key: PORT
+  ready_regex: null

@@ -1,0 +1,43 @@
+[package]
+name = "graphiti-search"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Local dependencies
+graphiti-core = { path = "../graphiti-core" }
+
+# Search
+tantivy.workspace = true
+
+# Async
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Utilities
+uuid.workspace = true
+chrono.workspace = true
+dashmap.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Caching
+moka.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+criterion.workspace = true
+tempfile.workspace = true

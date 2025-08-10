@@ -1,0 +1,15 @@
+{
+  "semantics_to_tools": {
+    "add_memory": { "py": "add_memory", "rs": "add_memory" },
+    "search_nodes": { "py": "search_memory_nodes", "rs": "search_memory" },
+    "search_facts": { "py": "search_memory_facts", "rs": null },
+    "related": { "py": null, "rs": "get_related_memories" }
+  },
+  "arg_mappings": {
+    "add_memory": {
+      "py_from_common": { "name": "name", "content": "episode_body", "source": "source", "group_id": "group_id" },
+      "rs_from_common": { "name": "name", "content": "content", "source": "source", "memory_type": "memory_type" }
+    }
+  },
+  "nondeterministic_fields": ["id", "uuid", "node_id", "created_at", "updated_at", "timestamp"]
+}

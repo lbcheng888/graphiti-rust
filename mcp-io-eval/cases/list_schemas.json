@@ -1,0 +1,16 @@
+{
+  "id": "SCHEMA_LIST",
+  "description": "列出工具并比对输入 schema",
+  "type": "tools_list",
+  "assert": {
+    "diff": {
+      "check": [
+        "name",
+        "description",
+        "inputSchema.type",
+        "inputSchema.required",
+        "inputSchema.properties"
+      ]
+    }
+  }
+}

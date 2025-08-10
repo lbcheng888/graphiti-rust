@@ -1,0 +1,39 @@
+{
+  "database": {
+    "connection_timeout": 30,
+    "enable_pooling": true,
+    "max_connections": 10,
+    "query_timeout": 60,
+    "url": "sqlite://graphiti.db"
+  },
+  "embedding": {
+    "api_key": "",
+    "batch_size": 100,
+    "dimensions": 1536,
+    "model": "text-embedding-ada-002",
+    "provider": "openai",
+    "timeout": 30
+  },
+  "enable_metrics": true,
+  "llm": {
+    "api_key": "",
+    "endpoint": "",
+    "max_retries": 3,
+    "model": "gpt-4",
+    "provider": "openai",
+    "rate_limit": 60,
+    "timeout": 30
+  },
+  "log_level": "info",
+  "metrics_port": 9090,
+  "server": {
+    "cert_path": "",
+    "host": "0.0.0.0",
+    "key_path": "",
+    "max_body_size": 10485760,
+    "port": 8080,
+    "request_timeout": 30,
+    "tls": false
+  }
+}
+

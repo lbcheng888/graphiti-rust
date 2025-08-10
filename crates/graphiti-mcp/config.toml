@@ -1,0 +1,34 @@
+# Graphiti MCP Server Configuration
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[cozo]
+engine = "mem"
+path = ""
+options = {}
+
+[llm]
+provider = "ollama"
+model = "llama3.2:latest"
+base_url = "http://localhost:11434"
+temperature = 0.7
+max_retries = 3
+
+[embedder]
+provider = "qwen3embedanything"
+api_key = ""  # Not required for local models
+model = "Qwen/Qwen3-Embedding-0.6B"
+dimension = 1024
+batch_size = 32
+timeout = 120
+
+[graphiti]
+name = "graphiti-mcp"
+enable_deduplication = true
+min_entity_confidence = 0.7
+min_relationship_confidence = 0.6
+max_context_window = 4000
+generate_embeddings = true
+skip_entity_extraction = false

@@ -1,0 +1,119 @@
+# Graphiti MCP Server Configuration
+
+[server]
+host = "0.0.0.0"
+port = 8080
+log_level = "info"
+# tls = { cert_path = "/etc/graphiti/tls/server.crt", key_path = "/etc/graphiti/tls/server.key" }
+
+# CozoDB Configuration (embedded graph database)
+[cozo]
+# Use sqlite/rocksdb in production for persistence
+engine = "sqlite"
+path = "./data/graphiti.db"
+options = {}
+
+# LLM Configuration - Choose one provider
+# Note: Set the API key in environment variables (e.g., OPENAI_API_KEY, GROQ_API_KEY)
+
+[llm]
+# LLM is not actually used in current implementation
+# Only embeddings are needed for semantic search and memory storage
+# Keeping minimal config to avoid errors
+provider = "ollama"
+model = "disabled"
+api_key = ""
+
+[llm.openai]
+base_url = "https://api.openai.com/v1"
+model = "gpt-4-turbo-preview"
+timeout_secs = 60
+max_retries = 3
+rate_limit = 60
+
+[llm.ollama]
+base_url = "http://localhost:11434"
+model = "llama3.1:8b"
+timeout_secs = 120
+max_retries = 3
+rate_limit = 120
+keep_alive_secs = 600
+
+[llm.ollama.options]
+temperature = 0.7
+top_p = 1.0
+top_k = 40
+num_predict = 1000
+num_ctx = 4096
+
+[llm.groq]
+base_url = "https://api.groq.com/openai/v1"
+model = "llama-3.1-8b-instant"
+timeout_secs = 30
+max_retries = 3
+rate_limit = 30
+
+[llm.huggingface]
+base_url = "https://api-inference.huggingface.co"
+model = "microsoft/DialoGPT-medium"
+timeout_secs = 60
+max_retries = 3
+rate_limit = 60
+
+# Embedder Configuration - Choose one provider
+# Note: Set API keys in environment variables for cloud providers
+
+[embedder]
+# Embedding provider: "openai", "voyage", "cohere", "local", "ollama", "qwencandle", "qwen3embedanything"
+provider = "qwencandle"
+model = "Qwen/Qwen3-Embedding-0.6B"
+dimension = 1536
+batch_size = 16
+timeout = 120
+api_key = ""
+
+[embedder.openai]
+model = "text-embedding-3-small"
+dimension = 1536
+batch_size = 100
+timeout_secs = 30
+
+[embedder.voyage]
+model = "voyage-2"
+dimension = 1024
+batch_size = 100
+timeout_secs = 30
+
+[embedder.cohere]
+model = "embed-english-v3.0"
+dimension = 1024
+batch_size = 96
+timeout_secs = 30
+
+[embedder.local]
+# Local SentenceTransformers server (free)
+base_url = "http://localhost:8000"
+model = "sentence-transformers/all-MiniLM-L6-v2"
+dimension = 384
+batch_size = 32
+timeout_secs = 60
+
+[embedder.ollama]
+# Ollama embedding models (free, local)
+base_url = "http://localhost:11434"
+model = "nomic-embed-text:latest"
+dimension = 768
+batch_size = 16
+timeout_secs = 60
+
+[graphiti]
+name = "default"
+enable_deduplication = true
+min_entity_confidence = 0.7
+min_relationship_confidence = 0.6
+max_context_window = 4000
+generate_embeddings = true
+
+[storage]
+search_index_path = "./data/search"
+vector_index_path = "./data/vectors"

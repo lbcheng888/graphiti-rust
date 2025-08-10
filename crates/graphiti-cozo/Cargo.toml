@@ -1,0 +1,45 @@
+[package]
+name = "graphiti-cozo"
+version = "0.1.0"
+authors = ["Graphiti Contributors"]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/getzep/graphiti"
+
+[dependencies]
+# Local dependencies
+graphiti-core = { path = "../graphiti-core" }
+
+# Backend selection (default to sqlx/sqlite which uses libsqlite3-sys)
+cozo = { version = "0.7", default-features = false, features = ["graph-algo"], optional = true }
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite"], optional = true }
+
+# Async
+tokio = { version = "1.41", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Utilities
+uuid = { version = "1.11", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+
+[features]
+# 默认使用基于 libsqlite3-sys 的 sqlx/sqlite 后端，避免与 sqlx 冲突
+default = ["backend-sqlx"]
+backend-sqlx = ["dep:sqlx"]
+backend-cozo = ["dep:cozo"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.0"

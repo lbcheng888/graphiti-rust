@@ -1,0 +1,28 @@
+{
+  "id": "A1",
+  "semantics": "add_memory",
+  "py": {
+    "tool": "add_memory",
+    "args": {
+      "name": "alice",
+      "episode_body": "Alice met Bob in the park.",
+      "source": "text",
+      "group_id": "eval"
+    }
+  },
+  "rs": {
+    "tool": "add_memory",
+    "args": {
+      "content": "Alice met Bob in the park.",
+      "name": "alice",
+      "source": "text",
+      "memory_type": "episodic"
+    }
+  },
+  "assert": {
+    "response": {
+      "require_any_of": ["id", "uuid", "node_id", "ok"],
+      "allow_extra": true
+    }
+  }
+}

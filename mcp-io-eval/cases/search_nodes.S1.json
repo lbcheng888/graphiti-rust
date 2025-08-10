@@ -1,0 +1,26 @@
+{
+  "id": "S1",
+  "semantics": "search_nodes",
+  "query": "Alice",
+  "py": {
+    "tool": "search_memory_nodes",
+    "args": {
+      "query": "Alice",
+      "limit": 5
+    }
+  },
+  "rs": {
+    "tool": "search_memory_nodes",
+    "args": {
+      "query": "Alice",
+      "limit": 5
+    }
+  },
+  "assert": {
+    "response_array_or_object": true,
+    "element_schema": {
+      "allow_extra": true,
+      "fields_any_of": ["id", "uuid", "score", "content", "name", "type"]
+    }
+  }
+}

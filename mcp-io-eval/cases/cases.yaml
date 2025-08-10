@@ -1,0 +1,12 @@
+# 针对 graphiti-mcp 的 smoke 用例，验证握手后 tools/call 的等价性
+cases:
+  - name: add_memory_smoke
+    tool: add_memory
+    arguments:
+      content: "hello world from smoke"
+      source: "smoke"
+  - name: search_memory_smoke
+    tool: search_memory_nodes
+    arguments:
+      query: "hello"
+      limit: 5

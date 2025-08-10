@@ -1,0 +1,15 @@
+# Candle 与本地嵌入路径示例，占位待替换
+[models]
+llm_backend = "candle"
+llm_model_path = "/absolute/path/to/qwen2.5-instruct.gguf"
+embed_backend = "candle"
+embed_model_path = "/absolute/path/to/qwen2-encoder-or-gte-variant.gguf"
+
+[storage]
+# 单独使用一个 sqlite 文件，避免污染项目其他数据
+cozo_db_path = "/absolute/path/to/.cozo/graphiti_mcp_eval.sqlite"
+
+[defaults]
+# 避免使用任何远端推理
+prefer_local_only = true
+

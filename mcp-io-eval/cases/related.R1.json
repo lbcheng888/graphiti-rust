@@ -1,0 +1,18 @@
+{
+  "id": "R1",
+  "semantics": "related",
+  "py": {
+    "tool": null,
+    "args": {}
+  },
+  "rs": {
+    "tool": "get_related_memories",
+    "args_from_previous": "A1",
+    "args": {
+      "id_field_candidates": ["id", "uuid", "node_id"]
+    }
+  },
+  "policy": {
+    "python_missing": "rust_extension_only"
+  }
+}

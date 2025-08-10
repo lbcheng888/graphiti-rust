@@ -1,0 +1,51 @@
+[package]
+name = "graphiti-distributed"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Distributed architecture for Graphiti using libp2p"
+
+[dependencies]
+# Core dependencies
+graphiti-core = { path = "../graphiti-core" }
+
+# Async runtime
+tokio.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+
+# P2P networking - 使用兼容版本
+libp2p = { version = "0.56", features = ["kad", "mdns", "noise", "tcp", "yamux", "gossipsub", "identify", "ping", "request-response", "tokio", "macros", "serde", "quic"] }
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Utilities
+uuid.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+
+# Logging
+tracing.workspace = true
+
+# Cryptography
+sha2 = "0.10"
+blake3 = "1.5"
+
+# Consensus (simplified without raft for now)
+# raft = "0.7"
+
+# Configuration
+config.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+criterion.workspace = true

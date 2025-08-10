@@ -1,0 +1,58 @@
+# Graphiti MCP Server Project Configuration Template
+# This file will be automatically copied to .graphiti/config.toml in your project
+
+[server]
+# Server settings
+host = "127.0.0.1"
+port = 8080
+max_connections = 100
+
+[cozo]
+# CozoDB configuration (default to in-memory for zero-setup)
+engine = "mem"
+path = ""  # For mem engine, path is unused; project isolation can override
+options = {}
+
+[llm]
+# LLM configuration
+provider = "openai"
+model = "gpt-4"
+api_key = ""  # Set your API key here or use environment variable
+temperature = 0.7
+max_tokens = 2048
+
+[embedder]
+# Embedding configuration - using local Qwen3 model
+provider = "qwen3_embed_anything"
+model = "Qwen/Qwen3-Embedding-0.6B"
+device = "auto"
+batch_size = 32
+
+[graphiti]
+# Graphiti-specific settings
+max_episode_length = 1000
+max_memories_per_search = 50
+similarity_threshold = 0.7
+learning_enabled = true
+auto_scan_enabled = true
+scan_interval_minutes = 30
+
+# Project-specific settings
+[project]
+name = "My Project"
+description = "Project description"
+root_path = "."
+ignore_patterns = [
+    "target/",
+    "node_modules/",
+    ".git/",
+    "*.log",
+    "*.tmp"
+]
+
+# Logging configuration
+[logging]
+level = "info"
+file_path = "./.graphiti/logs/graphiti.log"
+max_file_size = "10MB"
+max_files = 5
