@@ -118,6 +118,7 @@ pub struct DevelopmentContext {
     pub activity_type: Option<ActivityType>,
 
     /// Confidence in activity detection
+    #[allow(dead_code)]
     pub confidence: f32,
 
     /// Start time of current context

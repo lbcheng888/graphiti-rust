@@ -96,7 +96,7 @@ impl LearningAwareGraphitiService {
 #[async_trait::async_trait]
 impl GraphitiService for LearningAwareGraphitiService {
     async fn add_memory(&self, req: AddMemoryRequest) -> GraphitiResult<AddMemoryResponse> {
-        info!("🧠 Learning-aware memory addition starting");
+        info!("Learning-aware memory addition starting");
 
         // Call the inner service first
         let response = self.inner.add_memory(req.clone()).await?;
@@ -112,7 +112,7 @@ impl GraphitiService for LearningAwareGraphitiService {
         {
             Ok(events) => {
                 if !events.is_empty() {
-                    info!("🎯 Detected {} learning events", events.len());
+                    info!("Detected {} learning events", events.len());
 
                     // Send notifications for each learning event
                     for event in &events {
@@ -120,7 +120,7 @@ impl GraphitiService for LearningAwareGraphitiService {
                         {
                             warn!("Failed to send learning notification: {}", e);
                         } else {
-                            debug!("📢 Sent notification for learning event: {}", event.summary);
+                            debug!("Sent notification for learning event: {}", event.summary);
                         }
                     }
                 } else {
@@ -133,7 +133,7 @@ impl GraphitiService for LearningAwareGraphitiService {
             }
         }
 
-        info!("✅ Learning-aware memory addition completed");
+        info!("Learning-aware memory addition completed");
         Ok(response)
     }
 

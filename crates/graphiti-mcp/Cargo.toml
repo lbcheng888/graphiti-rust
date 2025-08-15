@@ -27,7 +27,8 @@ async-trait.workspace = true
 # Web
 axum.workspace = true
 tower.workspace = true
-tower-http.workspace = true
+# Enable extra features required by imports in main.rs
+tower-http = { workspace = true, features = ["trace", "cors", "timeout", "limit"] }
 futures-util = "0.3"
 async-stream = "0.3"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
@@ -57,6 +58,11 @@ clap.workspace = true
 config.workspace = true
 toml.workspace = true
 dotenvy.workspace = true
+
+# Rate limiting & utilities
+governor.workspace = true
+nonzero_ext.workspace = true
+once_cell.workspace = true
 
 # Metrics (already declared above)
 

@@ -5,11 +5,11 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+#[cfg(feature = "embed-anything")]
+use tracing::debug;
 
 use crate::EmbeddingClient;
-use graphiti_core::error::Error;
-use graphiti_core::error::Result;
+use graphiti_core::error::{Error, Result};
 
 #[cfg(feature = "embed-anything")]
 use embed_anything::embed_query;
@@ -54,9 +54,9 @@ impl Qwen3EmbedAnythingClient {
     pub async fn new(config: Qwen3EmbedAnythingConfig) -> Result<Self> {
         #[cfg(feature = "embed-anything")]
         {
-            info!("🚀 初始化 Qwen3-Embedding 使用 embed_anything");
-            info!("📋 模型: {}", config.model_id);
-            info!("🔧 设备: {}", config.device);
+            tracing::info!("初始化 Qwen3-Embedding 使用 embed_anything");
+            tracing::info!("模型: {}", config.model_id);
+            tracing::info!("设备: {}", config.device);
 
             // Create embedder with the model
             let embedder = Embedder::from_pretrained_hf(
@@ -68,14 +68,14 @@ impl Qwen3EmbedAnythingClient {
             )
             .map_err(|e| Error::Configuration(format!("Failed to create embedder: {}", e)))?;
 
-            info!("✅ Qwen3-Embedding 客户端创建成功");
+            tracing::info!("Qwen3-Embedding 客户端创建成功");
 
             Ok(Self { embedder, config })
         }
 
         #[cfg(not(feature = "embed-anything"))]
         {
-            warn!("⚠️ embed-anything 特性未启用，使用占位符实现");
+            tracing::warn!("embed-anything 特性未启用，使用占位符实现");
             Ok(Self {
                 config,
                 _phantom: std::marker::PhantomData,
@@ -84,13 +84,13 @@ impl Qwen3EmbedAnythingClient {
     }
 
     /// Generate embeddings for a single text
-    pub async fn embed_text(&self, text: &str) -> Result<Vec<f32>> {
+    pub async fn embed_text(&self, _text: &str) -> Result<Vec<f32>> {
         #[cfg(feature = "embed-anything")]
         {
-            debug!("🔄 生成嵌入向量，文本长度: {}", text.len());
+            debug!("Generating embedding, text_len={}", _text.len());
 
             // Use embed_query function with proper parameters
-            let texts: Vec<&str> = vec![text];
+            let texts: Vec<&str> = vec![_text];
             let embedding = embed_query(&texts, &self.embedder, None)
                 .await
                 .map_err(|e| {
@@ -114,7 +114,7 @@ impl Qwen3EmbedAnythingClient {
 
         #[cfg(not(feature = "embed-anything"))]
         {
-            warn!("使用占位符嵌入实现");
+            tracing::warn!("使用占位符嵌入实现");
             // Return a placeholder embedding with correct dimension (1024 for Qwen3-0.6B)
             Ok(vec![0.0; 1024])
         }
@@ -124,7 +124,7 @@ impl Qwen3EmbedAnythingClient {
     pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         #[cfg(feature = "embed-anything")]
         {
-            debug!("🔄 批量生成嵌入向量，文本数量: {}", texts.len());
+            debug!("批量生成嵌入向量，文本数量: {}", texts.len());
 
             // Convert Vec<String> to Vec<&str>
             let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
@@ -154,7 +154,7 @@ impl Qwen3EmbedAnythingClient {
 
         #[cfg(not(feature = "embed-anything"))]
         {
-            warn!("使用占位符批量嵌入实现");
+            tracing::warn!("使用占位符批量嵌入实现");
             // Return placeholder embeddings
             Ok(texts.iter().map(|_| vec![0.0; 1024]).collect())
         }
@@ -191,9 +191,13 @@ impl Qwen3EmbedAnythingClient {
 /// Embedding service trait implementation
 #[async_trait]
 pub trait EmbeddingService: Send + Sync {
+    /// Generate an embedding vector for a single text input
     async fn embed_text(&self, text: &str) -> Result<Vec<f32>>;
+    /// Generate embedding vectors for a batch of texts
     async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    /// Compute cosine similarity between two embedding vectors
     fn cosine_similarity(&self, a: &[f32], b: &[f32]) -> f32;
+    /// Return the embedding dimensionality produced by this service
     fn embedding_dim(&self) -> usize;
 }
 

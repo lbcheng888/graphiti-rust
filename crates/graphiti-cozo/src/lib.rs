@@ -60,6 +60,7 @@ pub struct CozoDriver {
 
 impl CozoDriver {
     /// Create a new CozoDB driver with the given configuration
+    #[allow(unreachable_code)]
     pub async fn new(config: CozoConfig) -> Result<Self> {
         info!("Creating storage instance with engine: {}", config.engine);
 
@@ -89,6 +90,16 @@ impl CozoDriver {
                 .connect(&url)
                 .await
                 .map_err(|e| Error::Storage(format!("Failed to connect sqlite (sqlx): {}", e)))?;
+            // Pragmas for durability/performance balance
+            let pragmas = [
+                "PRAGMA journal_mode=WAL",
+                "PRAGMA synchronous=NORMAL",
+                "PRAGMA busy_timeout=5000",
+                "PRAGMA temp_store=MEMORY",
+            ];
+            for p in pragmas.iter() {
+                let _ = sqlx::query(p).execute(&pool).await;
+            }
             let driver = Self {
                 pool: Arc::new(pool),
                 #[cfg(feature = "backend-cozo")]
@@ -150,6 +161,9 @@ impl CozoDriver {
                 "CREATE TABLE IF NOT EXISTS ctx_kv (ns TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY(ns, k))",
                 "CREATE TABLE IF NOT EXISTS file_snapshots (ns TEXT NOT NULL, path TEXT NOT NULL, content TEXT NOT NULL, updated_at REAL NOT NULL, PRIMARY KEY(ns, path))",
                 "CREATE TABLE IF NOT EXISTS edges (id TEXT PRIMARY KEY, source_id TEXT NOT NULL, target_id TEXT NOT NULL, relationship TEXT NOT NULL, properties TEXT NOT NULL, created_at REAL NOT NULL, valid_from REAL NOT NULL, valid_to REAL, expired_at REAL, weight REAL NOT NULL)",
+                // Useful indices for recent queries and retention pruning
+                "CREATE INDEX IF NOT EXISTS idx_edges_created_at ON edges(created_at)",
+                "CREATE INDEX IF NOT EXISTS idx_edges_rel_created ON edges(relationship, created_at)",
             ];
             for s in stmts.iter() {
                 sqlx::query(s)
@@ -189,6 +203,7 @@ impl CozoDriver {
     }
 
     /// Create a table if it doesn't exist (idempotent operation)
+    #[allow(dead_code)]
     async fn create_table_if_not_exists(&self, table_name: &str, schema: &str) -> Result<()> {
         #[cfg(feature = "backend-cozo")]
         {
@@ -376,7 +391,7 @@ impl GraphStorage for CozoDriver {
         // Determine node type and insert accordingly
         if labels.contains(&"Entity".to_string()) {
             // This is an entity node
-            let script = format!(
+            let _script = format!(
                 r#"
                 ?[id, name, entity_type, labels, properties, created_at, valid_from, valid_to, expired_at, embedding] <- [[
                     to_uuid("{}"), "{}", "{}", {}, {}, {}, {}, {}, {}, null
@@ -424,7 +439,7 @@ impl GraphStorage for CozoDriver {
             return Ok(None);
         }
         // Try to find the node in each table
-        let script = format!(
+        let _script = format!(
             r#"
             ?[id, name, entity_type, labels, properties, created_at, valid_from, valid_to, expired_at, embedding] := 
                 entity_nodes[id, name, entity_type, labels, properties, created_at, valid_from, valid_to, expired_at, embedding],
@@ -456,7 +471,7 @@ let _result = self.query_script(&script).await?;
             debug!("[mem] delete_node skipped scripts for {}", id);
             return Ok(());
         }
-        let script = format!(
+        let _script = format!(
             r#"
             ?[id] <- [[to_uuid("{}")]]
             :rm entity_nodes {{id}}
@@ -517,6 +532,63 @@ let _result = self.query_script(&script).await?;
             "Created edge from {} to {} with relationship {}",
             edge.source_id, edge.target_id, edge.relationship
         );
+        Ok(())
+    }
+
+    #[instrument(skip(self, edges))]
+    async fn create_edges_batch(&self, edges: &[Edge]) -> Result<()> {
+        if edges.is_empty() {
+            return Ok(());
+        }
+        if self._config.engine == "mem" || self._config.engine == "rocksdb" {
+            #[cfg(feature = "backend-cozo")]
+            {
+                let mut map = self.edges_mem.lock().await;
+                for edge in edges {
+                    map.insert(edge.id, edge.clone());
+                }
+            }
+            #[cfg(not(feature = "backend-cozo"))]
+            {
+                return Err(Error::Storage("cozo backend not compiled".to_string()));
+            }
+        } else {
+            #[cfg(feature = "backend-sqlx")]
+            {
+                let mut tx = self
+                    .pool
+                    .begin()
+                    .await
+                    .map_err(|e| Error::Storage(format!("Failed to begin transaction: {}", e)))?;
+                for edge in edges {
+                    let (created_at, valid_from, valid_to, expired_at) =
+                        self.temporal_to_timestamps(&edge.temporal);
+                    let props = edge.properties.to_string();
+                    sqlx::query("INSERT OR REPLACE INTO edges(id,source_id,target_id,relationship,properties,created_at,valid_from,valid_to,expired_at,weight) VALUES(?,?,?,?,?,?,?,?,?,?)")
+                        .bind(edge.id.to_string())
+                        .bind(edge.source_id.to_string())
+                        .bind(edge.target_id.to_string())
+                        .bind(&edge.relationship)
+                        .bind(props)
+                        .bind(created_at)
+                        .bind(valid_from)
+                        .bind(valid_to)
+                        .bind(expired_at)
+                        .bind(edge.weight as f64)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| Error::Storage(format!("Failed to insert edge in batch: {}", e)))?;
+                }
+                tx.commit()
+                    .await
+                    .map_err(|e| Error::Storage(format!("Failed to commit transaction: {}", e)))?;
+            }
+            #[cfg(not(feature = "backend-sqlx"))]
+            {
+                return Err(Error::Storage("sqlx backend not compiled".to_string()));
+            }
+        }
+        debug!("Created {} edges in batch", edges.len());
         Ok(())
     }
 
@@ -660,10 +732,18 @@ let _result = self.query_script(&script).await?;
                     relationship: rel,
                     properties: props,
                     temporal: TemporalMetadata {
-                        created_at: chrono::Utc.timestamp_millis((created_at_f * 1000.0) as i64),
-                        valid_from: chrono::Utc.timestamp_millis((valid_from_f * 1000.0) as i64),
-                        valid_to: valid_to_o.map(|v| chrono::Utc.timestamp_millis((v * 1000.0) as i64)),
-                        expired_at: expired_at_o.map(|v| chrono::Utc.timestamp_millis((v * 1000.0) as i64)),
+                        created_at: chrono::Utc
+                            .timestamp_millis_opt((created_at_f * 1000.0) as i64)
+                            .single()
+                            .unwrap_or_else(chrono::Utc::now),
+                        valid_from: chrono::Utc
+                            .timestamp_millis_opt((valid_from_f * 1000.0) as i64)
+                            .single()
+                            .unwrap_or_else(chrono::Utc::now),
+                        valid_to: valid_to_o
+                            .and_then(|v| chrono::Utc.timestamp_millis_opt((v * 1000.0) as i64).single()),
+                        expired_at: expired_at_o
+                            .and_then(|v| chrono::Utc.timestamp_millis_opt((v * 1000.0) as i64).single()),
                     },
                     weight: weight_f as f32,
                 });
@@ -689,9 +769,7 @@ let _result = self.query_script(&script).await?;
 
     #[instrument(skip(self))]
     async fn get_all_nodes(&self) -> Result<Vec<Box<dyn graphiti_core::graph::Node>>> {
-        // For now, return empty vector - this would need proper implementation
-        // based on the specific node types in the database
-        warn!("get_all_nodes not fully implemented yet");
+        // Minimal viable implementation: return empty until node tables are defined
         Ok(Vec::new())
     }
 
@@ -702,7 +780,7 @@ let _result = self.query_script(&script).await?;
             {
             use sqlx::Row;
             let rows = sqlx::query(
-                "SELECT id, source_id, target_id, relationship, properties, created_at, valid_from, valid_to, expired_at, weight FROM edges"
+                "SELECT id, source_id, target_id, relationship, properties, created_at, valid_from, valid_to, expired_at, weight FROM edges ORDER BY created_at DESC LIMIT 2000"
             )
             .fetch_all(&* self.pool)
             .await

@@ -6,22 +6,22 @@
 use async_trait::async_trait;
 use candle_core::DType;
 use candle_core::Device;
-use candle_core::Tensor;
 
-// Note: Using a generic transformer model since Qwen2 might not be available
-// In a real implementation, you would use the appropriate model for Qwen3-Embedding
 use graphiti_core::error::Error;
 use graphiti_core::error::Result;
-use hf_hub::api::tokio::Api;
 use moka::future::Cache;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokenizers::Tokenizer;
 use tokio::sync::RwLock;
 use tracing::debug;
 use tracing::info;
 use tracing::instrument;
+
+#[cfg(feature = "embed-anything")]
+use embed_anything::embed_query;
+#[cfg(feature = "embed-anything")]
+use embed_anything::embeddings::embed::{EmbedData, Embedder, EmbeddingResult};
 
 use crate::EmbeddingClient;
 
@@ -55,6 +55,8 @@ pub struct QwenCandleConfig {
     pub max_length: usize,
     /// Whether to normalize embeddings
     pub normalize: bool,
+    /// Enforce offline-only behavior: if true, requires local cache files and never attempts network
+    pub offline: bool,
     /// Data type for computations
     pub dtype: DType,
 }
@@ -62,52 +64,32 @@ pub struct QwenCandleConfig {
 impl Default for QwenCandleConfig {
     fn default() -> Self {
         Self {
-            model_repo: "Qwen/Qwen3-0.6B-Base".to_string(),
+            model_repo: "Qwen/Qwen3-Embedding-0.6B".to_string(),
             revision: "main".to_string(),
             cache_dir: Some(PathBuf::from("./Qwen3-Embedding-0.6B")),
             device: Device::Cpu,
-            dimension: 768,
+            dimension: 1536,
             batch_size: 16,
-            max_length: 512,
+            max_length: 8192,
             normalize: true,
+            offline: true,
             dtype: DType::F32,
         }
     }
 }
 
-/// Simple model wrapper for demonstration
-/// In a real implementation, this would be the actual Candle model
-pub struct SimpleModel {
-    dimension: usize,
-}
-
-impl SimpleModel {
-    pub fn new(dimension: usize) -> Self {
-        Self { dimension }
-    }
-
-    pub fn forward(
-        &self,
-        _input_ids: &Tensor,
-        _position_ids: usize,
-        _attention_mask: Option<&Tensor>,
-    ) -> std::result::Result<Tensor, candle_core::Error> {
-        // Placeholder implementation - returns random embeddings
-        // In reality, this would run the actual model inference
-        let batch_size = 1;
-        let seq_len = 10; // Simplified
-        let data: Vec<f32> = (0..batch_size * seq_len * self.dimension)
-            .map(|i| (i as f32) * 0.01)
-            .collect();
-        Tensor::from_vec(data, (batch_size, seq_len, self.dimension), &Device::Cpu)
-    }
-}
+// 使用 EmbedAnything 的 Embedder 作为真实模型（基于 Candle 后端）
+#[cfg(feature = "embed-anything")]
+pub type QwenInnerModel = Embedder;
+#[cfg(not(feature = "embed-anything"))]
+pub struct QwenInnerModelPlaceholder;
+#[cfg(not(feature = "embed-anything"))]
+pub type QwenInnerModel = QwenInnerModelPlaceholder;
 
 /// Candle-based Qwen embedding client
 pub struct QwenCandleClient {
     config: QwenCandleConfig,
-    model: Arc<RwLock<Option<SimpleModel>>>,
-    tokenizer: Arc<RwLock<Option<Tokenizer>>>,
+    model: Arc<RwLock<Option<QwenInnerModel>>>,
     cache: Cache<String, Vec<f32>>,
 }
 
@@ -128,186 +110,127 @@ impl QwenCandleClient {
         Ok(Self {
             config,
             model: Arc::new(RwLock::new(None)),
-            tokenizer: Arc::new(RwLock::new(None)),
             cache,
         })
     }
 
-    /// Load the model and tokenizer
+    /// Load the model (EmbedAnything-based, Candle backend)
     pub async fn load_model(&self) -> Result<()> {
         info!("Loading Qwen model: {}", self.config.model_repo);
 
-        // Download model files
-        let api = Api::new()
-            .map_err(|e| Error::Configuration(format!("Failed to create HF API: {}", e)))?;
-        let repo = api.model(self.config.model_repo.clone());
+        // 优先使用本地缓存目录（配置的 cache_dir 或环境变量 QWEN_CANDLE_CACHE_DIR）
+        let env_dir = std::env::var("QWEN_CANDLE_CACHE_DIR").ok().map(PathBuf::from);
+        let local_dir = env_dir.or_else(|| self.config.cache_dir.clone());
+        if let Some(dir) = &local_dir {
+            info!("Using local Qwen cache directory: {}", dir.as_path().display());
+        }
 
-        // Download config
-        let _config_path = repo
-            .get("config.json")
-            .await
-            .map_err(|e| Error::Configuration(format!("Failed to download config: {}", e)))?;
+        #[cfg(feature = "embed-anything")]
+        let cache_dir_string = local_dir.as_ref().map(|p| p.to_string_lossy().to_string());
+        #[cfg(feature = "embed-anything")]
+        let cache_dir_ref = cache_dir_string.as_deref();
 
-        // Download tokenizer
-        let tokenizer_path = repo
-            .get("tokenizer.json")
-            .await
-            .map_err(|e| Error::Configuration(format!("Failed to download tokenizer: {}", e)))?;
+        // 若 offline 开启，且目录缺失关键文件，直接报错，绝不联网
+        if self.config.offline {
+            if let Some(dir) = &local_dir {
+                let cfg = dir.join("config.json");
+                let tok = dir.join("tokenizer.json");
+                let mdl = dir.join("model.safetensors");
+                if !(cfg.is_file() && tok.is_file() && mdl.is_file()) {
+                    return Err(Error::Configuration(format!(
+                        "Offline mode: missing required files in {} (need config.json, tokenizer.json, model.safetensors)",
+                        dir.display()
+                    )));
+                }
+            } else {
+                return Err(Error::Configuration(
+                    "Offline mode: cache_dir not set and QWEN_CANDLE_CACHE_DIR not provided".to_string(),
+                ));
+            }
+        }
 
-        // Download model weights
-        let _model_path = repo
-            .get("model.safetensors")
-            .await
-            .map_err(|e| Error::Configuration(format!("Failed to download model: {}", e)))?;
+        #[cfg(feature = "embed-anything")]
+        let embedder = Embedder::from_pretrained_hf(
+            &self.config.model_repo,
+            &self.config.revision,
+            cache_dir_ref,
+            None,
+            None,
+        )
+        .map_err(|e| Error::Configuration(format!("Failed to create embedder: {}", e)))?;
 
-        // Load tokenizer
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| Error::Configuration(format!("Failed to load tokenizer: {}", e)))?;
+        #[cfg(feature = "embed-anything")]
+        {
+            *self.model.write().await = Some(embedder);
+            info!("Qwen model loaded successfully");
+            Ok(())
+        }
 
-        // Create simple model (placeholder)
-        // In a real implementation, you would load the actual Candle model here
-        let model = SimpleModel::new(self.config.dimension);
-
-        // Store model and tokenizer
-        *self.model.write().await = Some(model);
-        *self.tokenizer.write().await = Some(tokenizer);
-
-        info!("Qwen model loaded successfully");
-        Ok(())
+        #[cfg(not(feature = "embed-anything"))]
+        {
+            Err(Error::Configuration(
+                "embed-anything feature is required for QwenCandleClient".to_string(),
+            ))
+        }
     }
 
     /// Check if model is loaded
     pub async fn is_loaded(&self) -> bool {
-        self.model.read().await.is_some() && self.tokenizer.read().await.is_some()
+        self.model.read().await.is_some()
     }
 
-    /// Generate embeddings for texts using mean pooling
+    /// Generate embeddings for texts using EmbedAnything
     async fn generate_embeddings(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         if !self.is_loaded().await {
             self.load_model().await?;
         }
 
         let model_guard = self.model.read().await;
-        let tokenizer_guard = self.tokenizer.read().await;
-
-        let model = model_guard
+        let embedder = model_guard
             .as_ref()
             .ok_or_else(|| Error::EmbeddingProvider("Model not loaded".to_string()))?;
-        let tokenizer = tokenizer_guard
-            .as_ref()
-            .ok_or_else(|| Error::EmbeddingProvider("Tokenizer not loaded".to_string()))?;
 
-        let mut embeddings = Vec::new();
+        // Convert to &str slice
+        let text_refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
 
-        for text in texts {
-            // Tokenize text
-            let encoding = tokenizer
-                .encode(text.clone(), true)
-                .map_err(|e| Error::EmbeddingProvider(format!("Tokenization failed: {}", e)))?;
+        #[cfg(feature = "embed-anything")]
+        let embeddings: Vec<EmbedData> = embed_query(&text_refs, embedder, None)
+            .await
+            .map_err(|e| Error::EmbeddingProvider(format!("Embedding generation failed: {}", e)))?;
 
-            let tokens = encoding.get_ids();
-            let attention_mask = encoding.get_attention_mask();
-
-            // Truncate to max length
-            let max_len = self.config.max_length.min(tokens.len());
-            let input_ids = &tokens[..max_len];
-            let attention_mask = &attention_mask[..max_len];
-
-            // Convert to tensors
-            let input_ids = Tensor::new(input_ids, &self.config.device)
-                .map_err(|e| {
-                    Error::EmbeddingProvider(format!("Failed to create input tensor: {}", e))
-                })?
-                .unsqueeze(0)
-                .map_err(|e| {
-                    Error::EmbeddingProvider(format!("Failed to add batch dimension: {}", e))
-                })?;
-
-            let attention_mask = Tensor::new(attention_mask, &self.config.device)
-                .map_err(|e| {
-                    Error::EmbeddingProvider(format!("Failed to create attention mask: {}", e))
-                })?
-                .unsqueeze(0)
-                .map_err(|e| {
-                    Error::EmbeddingProvider(format!("Failed to add batch dimension: {}", e))
-                })?;
-
-            // Forward pass
-            let hidden_states = model.forward(&input_ids, 0, None).map_err(|e| {
-                Error::EmbeddingProvider(format!("Model forward pass failed: {}", e))
-            })?;
-
-            // Mean pooling with attention mask
-            let attention_mask_expanded = attention_mask
-                .unsqueeze(2)
-                .map_err(|e| {
-                    Error::EmbeddingProvider(format!("Failed to unsqueeze attention mask: {}", e))
-                })?
-                .expand(hidden_states.shape())
-                .map_err(|e| {
-                    Error::EmbeddingProvider(format!("Failed to expand attention mask: {}", e))
-                })?
-                .to_dtype(hidden_states.dtype())
-                .map_err(|e| {
-                    Error::EmbeddingProvider(format!(
-                        "Failed to convert attention mask dtype: {}",
-                        e
-                    ))
-                })?;
-
-            let masked_hidden_states = (hidden_states * attention_mask_expanded).map_err(|e| {
-                Error::EmbeddingProvider(format!("Failed to mask hidden states: {}", e))
-            })?;
-            let sum_hidden_states = masked_hidden_states.sum(1).map_err(|e| {
-                Error::EmbeddingProvider(format!("Failed to sum hidden states: {}", e))
-            })?;
-            let sum_attention_mask = attention_mask
-                .sum(1)
-                .map_err(|e| {
-                    Error::EmbeddingProvider(format!("Failed to sum attention mask: {}", e))
-                })?
-                .to_dtype(DType::F32)
-                .map_err(|e| {
-                    Error::EmbeddingProvider(format!("Failed to convert sum dtype: {}", e))
-                })?;
-
-            let mean_pooled = (sum_hidden_states
-                / sum_attention_mask.unsqueeze(1).map_err(|e| {
-                    Error::EmbeddingProvider(format!("Failed to unsqueeze sum: {}", e))
-                })?)
-            .map_err(|e| {
-                Error::EmbeddingProvider(format!("Failed to compute mean pooling: {}", e))
-            })?;
-
-            // Normalize if requested
-            let embedding = if self.config.normalize {
-                let norm = mean_pooled
-                    .sqr()
-                    .map_err(|e| Error::EmbeddingProvider(format!("Failed to square: {}", e)))?
-                    .sum_keepdim(1)
-                    .map_err(|e| Error::EmbeddingProvider(format!("Failed to sum: {}", e)))?
-                    .sqrt()
-                    .map_err(|e| Error::EmbeddingProvider(format!("Failed to sqrt: {}", e)))?;
-                (mean_pooled / norm)
-                    .map_err(|e| Error::EmbeddingProvider(format!("Failed to normalize: {}", e)))?
-            } else {
-                mean_pooled
-            };
-
-            // Convert to Vec<f32>
-            let embedding_vec = embedding
-                .squeeze(0)
-                .map_err(|e| Error::EmbeddingProvider(format!("Failed to squeeze: {}", e)))?
-                .to_vec1::<f32>()
-                .map_err(|e| {
-                    Error::EmbeddingProvider(format!("Failed to convert embedding to vec: {}", e))
-                })?;
-
-            embeddings.push(embedding_vec);
+        #[cfg(feature = "embed-anything")]
+        {
+            let mut result: Vec<Vec<f32>> = Vec::with_capacity(embeddings.len());
+            for embed_data in embeddings {
+                match embed_data.embedding {
+                    EmbeddingResult::DenseVector(mut vec) => {
+                        if self.config.normalize {
+                            let norm = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+                            if norm > 0.0 {
+                                for v in &mut vec {
+                                    *v /= norm;
+                                }
+                            }
+                        }
+                        result.push(vec);
+                    }
+                    _ => {
+                        return Err(Error::EmbeddingProvider(
+                            "Unexpected embedding result type".to_string(),
+                        ));
+                    }
+                }
+            }
+            debug!("Generated {} embeddings", result.len());
+            Ok(result)
         }
 
-        debug!("Generated {} embeddings", embeddings.len());
-        Ok(embeddings)
+        #[cfg(not(feature = "embed-anything"))]
+        {
+            Err(Error::Configuration(
+                "embed-anything feature is required for embedding generation".to_string(),
+            ))
+        }
     }
 }
 

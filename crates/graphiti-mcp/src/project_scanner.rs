@@ -122,12 +122,12 @@ impl ProjectScanner {
         &self,
         root_path: &Path,
     ) -> Result<ScanResult, Box<dyn std::error::Error + Send + Sync>> {
-        info!("🔍 Starting full project scan: {}", root_path.display());
+        info!("Starting full project scan: {}", root_path.display());
 
         // Detect project structure first
         let project_info = self.detect_project_structure(root_path).await?;
         info!(
-            "📁 Detected project: {} ({})",
+            "Detected project: {} ({})",
             project_info.name,
             format!("{:?}", project_info.language)
         );
@@ -177,7 +177,7 @@ impl ProjectScanner {
             .await?;
 
         info!(
-            "✅ Project scan complete: {} files, {} entities, {} memories",
+            "Project scan complete: {} files, {} entities, {} memories",
             scan_result.files_scanned, scan_result.entities_added, scan_result.memories_added
         );
 
@@ -208,7 +208,7 @@ impl ProjectScanner {
                 }
                 ChangeType::Deleted => {
                     // Handle file deletion - remove related entities
-                    debug!("📁 File deleted: {}", change.path.display());
+                    debug!("File deleted: {}", change.path.display());
                     // In a full implementation, we'd remove entities related to this file
                 }
             }

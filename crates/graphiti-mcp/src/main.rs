@@ -7,17 +7,18 @@ mod learning_endpoints;
 mod learning_integration;
 mod project_scanner;
 
+use axum::body::Body;
 use axum::extract::Query;
 use axum::extract::State;
+use axum::http::HeaderMap;
+use axum::http::Request as HttpRequest;
 use axum::http::StatusCode;
+use axum::middleware;
 use axum::response::Json;
+use axum::response::Response;
 use axum::routing::get;
 use axum::routing::post;
 use axum::Router;
-use axum::middleware;
-use axum::http::HeaderMap;
-use axum::response::Response;
-use axum::http::Request;
 // use chrono::DateTime; // 暂时未使用
 use chrono::Utc;
 use clap::Parser;
@@ -45,21 +46,32 @@ use graphiti_llm::EmbeddingProvider;
 use graphiti_llm::ExtractedEntity;
 use graphiti_llm::ExtractedRelationship;
 // use graphiti_llm::LLMClient; // 暂时未使用
+use axum_server::tls_rustls::RustlsConfig;
+use governor::clock::DefaultClock;
+use governor::state::direct::NotKeyed;
+use governor::state::InMemoryState;
+use governor::Quota;
+use governor::RateLimiter;
 use graphiti_llm::LLMConfig;
 use graphiti_llm::LLMProvider;
 use graphiti_llm::MultiLLMClient;
 use graphiti_llm::QwenCandleClient;
 use graphiti_llm::QwenCandleConfig;
+use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_exporter_prometheus::PrometheusHandle;
+use nonzero_ext::nonzero;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
-use tower_http::cors::{Any, CorsLayer};
-use tower_http::timeout::TimeoutLayer;
+use tower_http::cors::Any;
+use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::DefaultMakeSpan;
 use tower_http::trace::TraceLayer;
 use tracing::error;
@@ -68,14 +80,10 @@ use tracing::warn;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
-use metrics_exporter_prometheus::PrometheusBuilder;
-use metrics_exporter_prometheus::PrometheusHandle;
-use std::time::Duration;
-use axum_server::tls_rustls::RustlsConfig;
-use governor::{Quota, RateLimiter};
-use nonzero_ext::nonzero;
-use std::num::NonZeroU32;
+// NonZeroU32 is not used; remove import to silence warning
 use std::sync::Arc as StdArc;
+
+type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
 // Learning system imports
 use learning::ConsoleNotificationChannel;
@@ -278,7 +286,7 @@ pub struct AppState {
     notification_receiver:
         Arc<tokio::sync::RwLock<Option<broadcast::Receiver<LearningNotification>>>>,
     project_scanner: Arc<ProjectScanner>,
-    rate_limiter: StdArc<RateLimiter>,
+    rate_limiter: StdArc<Limiter>,
     auth_token: Option<String>,
 }
 
@@ -291,6 +299,7 @@ trait GraphitiService: Send + Sync {
     async fn get_memory(&self, id: Uuid) -> GraphitiResult<Option<MemoryNode>>;
     async fn get_related(&self, id: Uuid, depth: usize) -> GraphitiResult<Vec<RelatedMemory>>;
     /// Search extracted facts/relationships (minimal implementation for MCP parity)
+    #[allow(dead_code)]
     async fn search_memory_facts(
         &self,
         query: String,
@@ -636,14 +645,14 @@ async fn main() -> anyhow::Result<()> {
         notification_manager,
         notification_receiver: Arc::new(tokio::sync::RwLock::new(Some(notification_receiver))),
         project_scanner: project_scanner.clone(),
-        rate_limiter: StdArc::new(RateLimiter::direct(Quota::per_second(nonzero!(50u32)))) ,
+        rate_limiter: StdArc::new(RateLimiter::direct(Quota::per_second(nonzero!(50u32)))),
         auth_token: std::env::var("GRAPHITI_AUTH_TOKEN").ok(),
     };
 
     // Perform initial project scan if in current directory
     if let Ok(current_dir) = std::env::current_dir() {
         if project_scanner.needs_scan(&current_dir).await {
-            info!("🔍 Performing initial project scan...");
+            info!("Performing initial project scan...");
             tokio::spawn({
                 let scanner = project_scanner.clone();
                 let _service = graphiti_service.clone();
@@ -651,24 +660,24 @@ async fn main() -> anyhow::Result<()> {
                     match scanner.scan_project(&current_dir).await {
                         Ok(result) => {
                             info!(
-                                "✅ Initial project scan completed: {} files, {} entities, {} memories",
+                                "Initial project scan completed: {} files, {} entities, {} memories",
                                 result.files_scanned, result.entities_added, result.memories_added
                             );
                             scanner.mark_scanned(&current_dir).await;
                         }
                         Err(e) => {
-                            warn!("⚠️ Initial project scan failed: {}", e);
+                            warn!("Initial project scan failed: {}", e);
                         }
                     }
                 }
             });
         } else {
-            info!("📁 Project already scanned, skipping initial scan");
+            info!("Project already scanned, skipping initial scan");
         }
     }
 
     // Build router
-        let app = Router::new()
+    let app = Router::new()
         .route("/mcp", post(mcp_handler)) // Use standard MCP handler with all tools
         .route("/notifications", get(learning_notifications_stream)) // Learning notifications stream
         .route("/notifications/active", get(get_active_notifications)) // Get active notifications
@@ -677,9 +686,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/ready", get(ready_check))
         // Protected write endpoints
         .route("/memory", post(add_memory))
-            .route_layer(middleware::from_fn_with_state(state.clone(), auth_guard))
-            .route("/memory/search", get(search_memory))
-            .route("/memory/search", post(search_memory_json))
+        .route_layer(middleware::from_fn_with_state(state.clone(), auth_guard))
+        .route("/memory/search", get(search_memory))
+        .route("/memory/search", post(search_memory_json))
         .route("/memory/:id", get(get_memory))
         .route("/memory/:id/related", get(get_related))
         .route("/metrics", get(metrics))
@@ -687,7 +696,10 @@ async fn main() -> anyhow::Result<()> {
         .layer(build_cors_layer())
         .layer(RequestBodyLimitLayer::new(1 * 1024 * 1024))
         .layer(TimeoutLayer::new(Duration::from_secs(30)))
-        .layer(middleware::from_fn_with_state(state.clone(), rate_limit_guard))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_guard,
+        ))
         .with_state(state.clone());
 
     // Check if running in stdio mode
@@ -754,13 +766,14 @@ async fn main() -> anyhow::Result<()> {
         let addr = SocketAddr::from((host.parse::<std::net::IpAddr>()?, port));
 
         // Initialize Prometheus exporter
-        let recorder_handle = init_metrics()?;
+        let _ = init_metrics()?;
         info!("/metrics enabled");
 
         // TLS optional
         if let Some(tls) = &config.server.tls {
             info!("Starting MCP server with TLS on {}", addr);
-            let tls_config = RustlsConfig::from_pem_file(&tls.cert_path, &tls.key_path).await
+            let tls_config = RustlsConfig::from_pem_file(&tls.cert_path, &tls.key_path)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to load TLS certs: {}", e))?;
             axum_server::bind_rustls(addr, tls_config)
                 .serve(app.into_make_service())
@@ -1000,7 +1013,7 @@ async fn initialize_services(
     .await?;
 
     // Initialize learning system
-    info!("🧠 Initializing learning detection system...");
+    info!("Initializing learning detection system...");
 
     // Load learning configuration (use default if not found)
     let learning_config = LearningConfig::default();
@@ -1032,12 +1045,12 @@ async fn initialize_services(
     ));
 
     // Initialize project scanner
-    info!("🔍 Initializing project scanner...");
+    info!("Initializing project scanner...");
     let project_scanner = Arc::new(ProjectScanner::new(
         learning_aware_service.clone() as Arc<dyn GraphitiService>
     ));
 
-    info!("✅ Learning system initialized successfully");
+    info!("Learning system initialized successfully");
 
     Ok((
         learning_aware_service,
@@ -1375,9 +1388,16 @@ pub async fn mcp_handler(
                                         .and_then(|q| q.as_str())
                                         .unwrap_or("")
                                         .to_string();
-                                    let limit = args.get("limit").and_then(|l| l.as_u64()).map(|v| v as usize);
+                                    let limit = args
+                                        .get("limit")
+                                        .and_then(|l| l.as_u64())
+                                        .map(|v| v as usize);
 
-                                    match state.graphiti.search_memory_facts_json(query, limit).await {
+                                    match state
+                                        .graphiti
+                                        .search_memory_facts_json(query, limit)
+                                        .await
+                                    {
                                         Ok(facts_json) => {
                                             let total = facts_json.len();
                                             let response = serde_json::json!({
@@ -1400,25 +1420,38 @@ pub async fn mcp_handler(
                                 } else {
                                     Err(StatusCode::BAD_REQUEST)
                                 }
-                            },
+                            }
                             "add_memory" => {
                                 if let Some(args) = params.get("arguments") {
                                     // Accept Python-compatible fields by mapping them into our schema
                                     let mut args_mut = args.clone();
                                     // Map episode_body -> content
                                     if args_mut.get("content").is_none() {
-                                        if let Some(episode_body) = args_mut.get("episode_body").and_then(|v| v.as_str()) {
+                                        if let Some(episode_body) =
+                                            args_mut.get("episode_body").and_then(|v| v.as_str())
+                                        {
                                             args_mut["content"] = serde_json::json!(episode_body);
                                         }
                                     }
                                     // Map source_description -> metadata.source_description
-                                    if let Some(src_desc) = args_mut.get("source_description").and_then(|v| v.as_str()) {
+                                    if let Some(src_desc) =
+                                        args_mut.get("source_description").and_then(|v| v.as_str())
+                                    {
                                         // Build new metadata object without alias field
-                                        let mut metadata = args_mut.get("metadata").and_then(|m| m.as_object()).cloned().unwrap_or_default();
-                                        metadata.insert("source_description".to_string(), serde_json::json!(src_desc));
+                                        let mut metadata = args_mut
+                                            .get("metadata")
+                                            .and_then(|m| m.as_object())
+                                            .cloned()
+                                            .unwrap_or_default();
+                                        metadata.insert(
+                                            "source_description".to_string(),
+                                            serde_json::json!(src_desc),
+                                        );
                                         args_mut["metadata"] = serde_json::Value::Object(metadata);
                                         // Remove alias to avoid schema parse failure
-                                        if let Some(obj) = args_mut.as_object_mut() { obj.remove("source_description"); }
+                                        if let Some(obj) = args_mut.as_object_mut() {
+                                            obj.remove("source_description");
+                                        }
                                     }
 
                                     let req: AddMemoryRequest =
@@ -1453,21 +1486,25 @@ pub async fn mcp_handler(
                                     Err(StatusCode::BAD_REQUEST)
                                 }
                             }
-                            ,
                             "search_memory_nodes" => {
                                 // Alias to search_memory with Python-compatible argument names
                                 if let Some(args) = params.get("arguments") {
                                     // Accept {query, max_nodes} or legacy {limit}
                                     let mut mapped = serde_json::json!({});
-                                    if let Some(q) = args.get("query") { mapped["query"] = q.clone(); }
-                                    if let Some(m) = args.get("max_nodes").or_else(|| args.get("limit")) {
+                                    if let Some(q) = args.get("query") {
+                                        mapped["query"] = q.clone();
+                                    }
+                                    if let Some(m) =
+                                        args.get("max_nodes").or_else(|| args.get("limit"))
+                                    {
                                         mapped["limit"] = m.clone();
                                     }
 
-                                    let req: SearchMemoryRequest = match serde_json::from_value(mapped) {
-                                        Ok(req) => req,
-                                        Err(_) => return Err(StatusCode::BAD_REQUEST),
-                                    };
+                                    let req: SearchMemoryRequest =
+                                        match serde_json::from_value(mapped) {
+                                            Ok(req) => req,
+                                            Err(_) => return Err(StatusCode::BAD_REQUEST),
+                                        };
 
                                     match state.graphiti.search_memory(req).await {
                                         Ok(result) => {
@@ -1540,8 +1577,12 @@ pub async fn mcp_handler(
                             }
                             "delete_episode" => {
                                 if let Some(args) = params.get("arguments") {
-                                    let id_str = args.get("uuid").and_then(|v| v.as_str()).ok_or(StatusCode::BAD_REQUEST)?;
-                                    let id = uuid::Uuid::parse_str(id_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+                                    let id_str = args
+                                        .get("uuid")
+                                        .and_then(|v| v.as_str())
+                                        .ok_or(StatusCode::BAD_REQUEST)?;
+                                    let id = uuid::Uuid::parse_str(id_str)
+                                        .map_err(|_| StatusCode::BAD_REQUEST)?;
                                     match state.graphiti.delete_episode(id).await {
                                         Ok(_) => {
                                             let response = serde_json::json!({
@@ -1556,10 +1597,17 @@ pub async fn mcp_handler(
                                             Err(StatusCode::INTERNAL_SERVER_ERROR)
                                         }
                                     }
-                                } else { Err(StatusCode::BAD_REQUEST) }
+                                } else {
+                                    Err(StatusCode::BAD_REQUEST)
+                                }
                             }
                             "get_episodes" => {
-                                let last_n = params.get("arguments").and_then(|a| a.get("last_n")).and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+                                let last_n = params
+                                    .get("arguments")
+                                    .and_then(|a| a.get("last_n"))
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(10)
+                                    as usize;
                                 match state.graphiti.get_episodes(last_n).await {
                                     Ok(list) => {
                                         let json_payload = list; // EpisodeNode is Serialize
@@ -1576,26 +1624,28 @@ pub async fn mcp_handler(
                                     }
                                 }
                             }
-                            "clear_graph" => {
-                                match state.graphiti.clear_graph().await {
-                                    Ok(_) => {
-                                        let response = serde_json::json!({
-                                            "jsonrpc": "2.0",
-                                            "id": request.get("id"),
-                                            "result": {"content": [{"type": "text", "text": "Graph cleared"}]}
-                                        });
-                                        Ok(Json(response))
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to clear graph: {}", e);
-                                        Err(StatusCode::INTERNAL_SERVER_ERROR)
-                                    }
+                            "clear_graph" => match state.graphiti.clear_graph().await {
+                                Ok(_) => {
+                                    let response = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": request.get("id"),
+                                        "result": {"content": [{"type": "text", "text": "Graph cleared"}]}
+                                    });
+                                    Ok(Json(response))
                                 }
-                            }
+                                Err(e) => {
+                                    error!("Failed to clear graph: {}", e);
+                                    Err(StatusCode::INTERNAL_SERVER_ERROR)
+                                }
+                            },
                             "get_entity_edge" => {
                                 if let Some(args) = params.get("arguments") {
-                                    let id_str = args.get("uuid").and_then(|v| v.as_str()).ok_or(StatusCode::BAD_REQUEST)?;
-                                    let id = uuid::Uuid::parse_str(id_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+                                    let id_str = args
+                                        .get("uuid")
+                                        .and_then(|v| v.as_str())
+                                        .ok_or(StatusCode::BAD_REQUEST)?;
+                                    let id = uuid::Uuid::parse_str(id_str)
+                                        .map_err(|_| StatusCode::BAD_REQUEST)?;
                                     match state.graphiti.get_entity_edge_json(id).await {
                                         Ok(Some(edge_json)) => {
                                             let response = serde_json::json!({
@@ -1618,12 +1668,18 @@ pub async fn mcp_handler(
                                             Err(StatusCode::INTERNAL_SERVER_ERROR)
                                         }
                                     }
-                                } else { Err(StatusCode::BAD_REQUEST) }
+                                } else {
+                                    Err(StatusCode::BAD_REQUEST)
+                                }
                             }
                             "delete_entity_edge" => {
                                 if let Some(args) = params.get("arguments") {
-                                    let id_str = args.get("uuid").and_then(|v| v.as_str()).ok_or(StatusCode::BAD_REQUEST)?;
-                                    let id = uuid::Uuid::parse_str(id_str).map_err(|_| StatusCode::BAD_REQUEST)?;
+                                    let id_str = args
+                                        .get("uuid")
+                                        .and_then(|v| v.as_str())
+                                        .ok_or(StatusCode::BAD_REQUEST)?;
+                                    let id = uuid::Uuid::parse_str(id_str)
+                                        .map_err(|_| StatusCode::BAD_REQUEST)?;
                                     match state.graphiti.delete_entity_edge_by_uuid(id).await {
                                         Ok(true) => {
                                             let response = serde_json::json!({
@@ -1646,7 +1702,9 @@ pub async fn mcp_handler(
                                             Err(StatusCode::INTERNAL_SERVER_ERROR)
                                         }
                                     }
-                                } else { Err(StatusCode::BAD_REQUEST) }
+                                } else {
+                                    Err(StatusCode::BAD_REQUEST)
+                                }
                             }
                             "add_code_entity" => {
                                 if let Some(args) = params.get("arguments") {
@@ -1917,7 +1975,7 @@ pub async fn mcp_handler(
                                             "result": {
                                                 "content": [{
                                                     "type": "text",
-                                                    "text": format!("Project scan completed successfully!\n\n📊 **Scan Results:**\n- 📁 Files scanned: {}\n- 🧩 Code entities extracted: {}\n- 💭 Memories created: {}\n- 📂 Project: {}\n\nThe knowledge graph has been updated with your project structure and code entities.",
+                                                    "text": format!("Project scan completed successfully!\n\nScan Results:\n- Files scanned: {}\n- Code entities extracted: {}\n- Memories created: {}\n- Project: {}\n\nThe knowledge graph has been updated with your project structure and code entities.",
                                                         result.files_scanned, result.entities_added, result.memories_added,
                                                         result.project_info.as_ref().map(|p| p.name.as_str()).unwrap_or("Unknown"))
                                                 }]
@@ -2024,11 +2082,11 @@ fn build_cors_layer() -> CorsLayer {
         .allow_headers(Any)
 }
 
-async fn rate_limit_guard<B>(
+async fn rate_limit_guard(
     State(state): State<AppState>,
-    req: Request<B>,
-    next: middleware::Next<B>,
-) -> Result<Response, StatusCode> {
+    req: HttpRequest<Body>,
+    next: middleware::Next,
+) -> std::result::Result<Response, StatusCode> {
     state
         .rate_limiter
         .check()
@@ -2036,11 +2094,11 @@ async fn rate_limit_guard<B>(
     Ok(next.run(req).await)
 }
 
-async fn auth_guard<B>(
+async fn auth_guard(
     State(state): State<AppState>,
-    req: Request<B>,
-    next: middleware::Next<B>,
-) -> Result<Response, StatusCode> {
+    req: HttpRequest<Body>,
+    next: middleware::Next,
+) -> std::result::Result<Response, StatusCode> {
     if let Some(expected) = &state.auth_token {
         let headers = req.headers();
         if !is_authorized(headers, expected) {
@@ -2146,14 +2204,17 @@ async fn metrics() -> String {
         .unwrap_or_else(|| "".to_string())
 }
 
-static METRICS_EXPORTER: once_cell::sync::OnceCell<PrometheusHandle> = once_cell::sync::OnceCell::new();
+static METRICS_EXPORTER: once_cell::sync::OnceCell<PrometheusHandle> =
+    once_cell::sync::OnceCell::new();
 
 fn init_metrics() -> anyhow::Result<()> {
     if METRICS_EXPORTER.get().is_some() {
         return Ok(());
     }
     let builder = PrometheusBuilder::new();
-    let handle = builder.install_recorder().map_err(|e| anyhow::anyhow!("{}", e))?;
+    let handle = builder
+        .install_recorder()
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     METRICS_EXPORTER.set(handle).ok();
     Ok(())
 }
@@ -2161,9 +2222,11 @@ fn init_metrics() -> anyhow::Result<()> {
 /// Real implementation using CozoDB with unified intelligence
 struct RealGraphitiService {
     storage: Arc<CozoDriver>,
+    #[allow(dead_code)]
     llm_client: Option<Arc<MultiLLMClient>>,
     embedder: Arc<dyn EmbeddingClient>,
     ner_extractor: Arc<dyn graphiti_ner::EntityExtractor>,
+    #[allow(dead_code)]
     config: GraphitiConfig,
     /// Simple in-memory index for episodes to support search/get operations
     memory_index: Arc<RwLock<HashMap<Uuid, EpisodeNode>>>,
@@ -2199,21 +2262,26 @@ impl RealGraphitiService {
         let embedder: Arc<dyn EmbeddingClient> = match embedder_config.provider {
             EmbeddingProvider::QwenCandle => {
                 info!("Using Qwen Candle embedder (pure Rust)");
+                let cache_dir = std::env::var("QWEN_CANDLE_CACHE_DIR")
+                    .ok()
+                    .map(std::path::PathBuf::from)
+                    .or(Some(std::path::PathBuf::from("./Qwen3-Embedding-0.6B")));
                 let qwen_config = QwenCandleConfig {
                     model_repo: embedder_config.model.clone(),
                     device: detect_device(),
                     dimension: embedder_config.dimension,
                     batch_size: embedder_config.batch_size,
-                    max_length: 512,
+                    max_length: 8192,
                     normalize: true,
+                    offline: true, // 默认使用离线模式
                     revision: "main".to_string(),
-                    cache_dir: Some(std::path::PathBuf::from("./Qwen3-Embedding-0.6B")),
+                    cache_dir,
                     dtype: graphiti_llm::candle_core::DType::F32,
                 };
                 Arc::new(QwenCandleClient::new(qwen_config)?)
             }
             EmbeddingProvider::Qwen3EmbedAnything => {
-                info!("🚀 Using Qwen3-Embedding with embed_anything (recommended)");
+                info!("Using Qwen3-Embedding with embed_anything (recommended)");
                 let qwen3_config = Qwen3EmbedAnythingConfig {
                     model_id: embedder_config.model.clone(),
                     batch_size: embedder_config.batch_size,
@@ -2545,7 +2613,11 @@ impl GraphitiService for RealGraphitiService {
             })
             .collect();
 
-        info!("Search completed, found {} results ({} returned)", total, results.len());
+        info!(
+            "Search completed, found {} results ({} returned)",
+            total,
+            results.len()
+        );
 
         Ok(SearchMemoryResponse { results, total })
     }
@@ -2634,7 +2706,11 @@ impl GraphitiService for RealGraphitiService {
             .cloned()
             .collect();
         // Simple score: prefer higher confidence first
-        matches.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+        matches.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         if let Some(l) = limit {
             matches.truncate(l);
         }
@@ -2651,7 +2727,9 @@ impl GraphitiService for RealGraphitiService {
         let mut items: Vec<(Uuid, &SimpleExtractedRelationship)> = rel_map
             .iter()
             .filter(|(_, r)| {
-                if q.is_empty() { return true; }
+                if q.is_empty() {
+                    return true;
+                }
                 r.source.to_lowercase().contains(&q)
                     || r.target.to_lowercase().contains(&q)
                     || r.relationship.to_lowercase().contains(&q)
@@ -2659,13 +2737,21 @@ impl GraphitiService for RealGraphitiService {
             .map(|(id, r)| (*id, r))
             .collect();
         // sort by confidence desc
-        items.sort_by(|a,b| b.1.confidence.partial_cmp(&a.1.confidence).unwrap_or(std::cmp::Ordering::Equal));
-        if let Some(l) = limit { items.truncate(l); }
+        items.sort_by(|a, b| {
+            b.1.confidence
+                .partial_cmp(&a.1.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if let Some(l) = limit {
+            items.truncate(l);
+        }
         Ok(items
             .into_iter()
             .map(|(id, r)| {
                 let mut v = Self::relationship_to_json(r);
-                if let Some(obj) = v.as_object_mut() { obj.insert("uuid".to_string(), serde_json::json!(id)); }
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("uuid".to_string(), serde_json::json!(id));
+                }
                 v
             })
             .collect())
@@ -2796,7 +2882,7 @@ impl GraphitiService for RealGraphitiService {
             let idx = self.memory_index.read().await;
             idx.values().cloned().collect()
         };
-        episodes.sort_by(|a,b| b.temporal.created_at.cmp(&a.temporal.created_at));
+        episodes.sort_by(|a, b| b.temporal.created_at.cmp(&a.temporal.created_at));
         episodes.truncate(last_n);
         Ok(episodes)
     }
@@ -2804,16 +2890,20 @@ impl GraphitiService for RealGraphitiService {
     async fn clear_graph(&self) -> GraphitiResult<()> {
         // Minimal clear: drop in-memory indexes
         {
-            let mut idx = self.memory_index.write().await; idx.clear();
+            let mut idx = self.memory_index.write().await;
+            idx.clear();
         }
         {
-            let mut ents = self.memory_entities.write().await; ents.clear();
+            let mut ents = self.memory_entities.write().await;
+            ents.clear();
         }
         {
-            let mut rels = self.memory_relationships.write().await; rels.clear();
+            let mut rels = self.memory_relationships.write().await;
+            rels.clear();
         }
         {
-            let mut rel_map = self.memory_relationships_by_id.write().await; rel_map.clear();
+            let mut rel_map = self.memory_relationships_by_id.write().await;
+            rel_map.clear();
         }
         // Storage reset is backend-specific; skip for now
         Ok(())

@@ -52,6 +52,7 @@ pub enum ImplicitAction {
 
 /// Main hook implementation that integrates with IntegrationManager
 pub struct GraphitiHook {
+    #[allow(dead_code)]
     integration_manager: Arc<IntegrationManager>,
 }
 
@@ -178,6 +179,7 @@ impl ToolHook for GraphitiHook {
 
 impl GraphitiHook {
     /// Handle completion of file edits
+    #[allow(dead_code)]
     async fn handle_edit_completion(&self, params: &Value, _result: &Value) -> Vec<ImplicitAction> {
         let mut actions = vec![];
 
@@ -229,6 +231,7 @@ impl GraphitiHook {
     }
 
     /// Handle new file creation
+    #[allow(dead_code)]
     async fn handle_file_creation(&self, params: &Value, _result: &Value) -> Vec<ImplicitAction> {
         let mut actions = vec![];
 
@@ -278,6 +281,7 @@ impl GraphitiHook {
     }
 
     /// Handle command execution results
+    #[allow(dead_code)]
     async fn handle_command_execution(
         &self,
         params: &Value,
@@ -326,6 +330,7 @@ impl GraphitiHook {
 
     // Helper methods
 
+    #[allow(dead_code)]
     fn looks_like_function(&self, code: &str) -> bool {
         // Simple heuristic for function detection
         code.contains("fn ")
@@ -336,6 +341,7 @@ impl GraphitiHook {
             || code.contains("private ")
     }
 
+    #[allow(dead_code)]
     async fn looks_like_bug_fix(&self, old_code: &str, new_code: &str) -> bool {
         // Simple heuristics for bug fix detection
         let old_lower = old_code.to_lowercase();
@@ -349,6 +355,7 @@ impl GraphitiHook {
             || (new_lower.contains("check") && !old_lower.contains("check"))
     }
 
+    #[allow(dead_code)]
     fn summarize_change(&self, old_code: &str, new_code: &str) -> String {
         format!(
             "Changed {} lines",
@@ -356,6 +363,7 @@ impl GraphitiHook {
         )
     }
 
+    #[allow(dead_code)]
     async fn extract_function_entity(
         &self,
         code: &str,
@@ -385,6 +393,7 @@ impl GraphitiHook {
         None
     }
 
+    #[allow(dead_code)]
     fn extract_function_name(&self, line: &str) -> Option<String> {
         // Simple regex-like extraction
         let patterns = vec!["fn ", "def ", "function ", "func "];
@@ -406,6 +415,7 @@ impl GraphitiHook {
         None
     }
 
+    #[allow(dead_code)]
     async fn extract_entities_from_file(
         &self,
         _content: &str,
@@ -415,6 +425,7 @@ impl GraphitiHook {
         None
     }
 
+    #[allow(dead_code)]
     fn detect_language(&self, file_path: &str) -> Option<String> {
         let ext = file_path.split('.').last()?;
 
@@ -431,11 +442,13 @@ impl GraphitiHook {
         }
     }
 
+    #[allow(dead_code)]
     async fn detect_project_name(&self) -> String {
         // Would read from package.json, Cargo.toml, etc.
         "Current Project".to_string()
     }
 
+    #[allow(dead_code)]
     fn test_passed(&self, result: &Value) -> bool {
         // Check if test command was successful
         if let Some(output) = result.as_str() {

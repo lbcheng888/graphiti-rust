@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "graphiti-rust": {
+      "command": "/Users/lbcheng/graphiti-rust/target/release/graphiti-mcp-server",
+      "args": [
+        "--stdio",
+        "--log-level", "info",
+        "--config", "/Users/lbcheng/graphiti-rust/crates/graphiti-mcp/config.toml"
+      ],
+      "env": {
+        "GRAPHITI_PROJECT": "/Users/lbcheng/graphiti-rust",
+        "GRAPHITI_DB_PATH": "/Users/lbcheng/graphiti-rust/.graphiti/graphiti_mcp.sqlite",
+        "GRAPHITI_DATA_DIR": "/Users/lbcheng/graphiti-rust/.graphiti/data",
+        "RUST_LOG": "info",
+        "QWEN_CANDLE_CACHE_DIR": "/Users/lbcheng/Qwen3-Embedding-0.6B"
+      }
+    }
+  }
+}
+

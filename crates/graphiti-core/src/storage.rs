@@ -37,6 +37,29 @@ pub trait GraphStorage: Send + Sync {
     /// Create a new edge
     async fn create_edge(&self, edge: &Edge) -> Result<(), Self::Error>;
 
+    /// Create multiple edges in a batch. Default implementation falls back to per-edge writes.
+    async fn create_edges_batch(&self, edges: &[Edge]) -> Result<(), Self::Error> {
+        for edge in edges {
+            self.create_edge(edge).await?;
+        }
+        Ok(())
+    }
+
+    /// Prune oldest edges to keep at most `max_edges`. Returns number of deleted edges.
+    /// Default implementation fetches all edges and deletes extra ones by age.
+    async fn prune_to_limit(&self, max_edges: usize) -> Result<usize, Self::Error> {
+        let mut edges = self.get_all_edges().await?;
+        if edges.len() <= max_edges {
+            return Ok(0);
+        }
+        edges.sort_by_key(|e| e.temporal.created_at);
+        let to_remove = edges.len().saturating_sub(max_edges);
+        for e in edges.into_iter().take(to_remove) {
+            let _ = self.delete_edge_by_id(&e.id).await?;
+        }
+        Ok(to_remove)
+    }
+
     /// Get an edge by ID
     async fn get_edge_by_id(&self, id: &Uuid) -> Result<Option<Edge>, Self::Error>;
 

@@ -192,7 +192,7 @@ impl SmartLearningDetector {
 
             if is_new && entity.confidence >= self.config.entity_novelty_threshold {
                 // New entity type discovered!
-                info!("🆕 Discovered new entity type: {}", entity_type);
+                info!("Discovered new entity type: {}", entity_type);
 
                 let event = LearningEvent::new(
                     LearningEventType::NewEntityType {
@@ -258,7 +258,7 @@ impl SmartLearningDetector {
             if is_new_pattern
                 && relationship.confidence >= self.config.relationship_novelty_threshold
             {
-                info!("🔗 Discovered new relationship pattern: {}", pattern_type);
+                info!("Discovered new relationship pattern: {}", pattern_type);
 
                 let event = LearningEvent::new(
                     LearningEventType::NewRelationshipPattern {

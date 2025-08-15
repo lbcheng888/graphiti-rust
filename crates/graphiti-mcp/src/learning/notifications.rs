@@ -46,10 +46,10 @@ impl NotificationLevel {
     /// Get emoji representation
     pub fn emoji(&self) -> &'static str {
         match self {
-            NotificationLevel::Info => "ℹ️",
-            NotificationLevel::Success => "✅",
-            NotificationLevel::Warning => "⚠️",
-            NotificationLevel::Critical => "🚨",
+            NotificationLevel::Info => "INFO",
+            NotificationLevel::Success => "SUCCESS",
+            NotificationLevel::Warning => "WARNING",
+            NotificationLevel::Critical => "CRITICAL",
         }
     }
 }
@@ -254,13 +254,13 @@ pub struct ConsoleNotificationChannel;
 impl NotificationChannel for ConsoleNotificationChannel {
     async fn send_notification(&self, notification: &LearningNotification) -> LearningResult<()> {
         let level_str = format!("{} {:?}", notification.level.emoji(), notification.level);
-        println!("\n🧠 [LEARNING] {} {}", level_str, notification.title);
-        println!("   📝 {}", notification.message);
+        println!("\n[LEARNING] {} {}", level_str, notification.title);
+        println!("   NOTE {}", notification.message);
 
         if !notification.actions.is_empty() {
-            println!("   💡 Actions:");
+            println!("   Actions:");
             for action in &notification.actions {
-                println!("      • {}", action.label);
+                println!("      - {}", action.label);
             }
         }
 
