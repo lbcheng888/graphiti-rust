@@ -171,7 +171,7 @@ where
                     node_order.sort_by_key(|&id| {
                         let mut hash = seed;
                         for _byte in id.as_bytes() {
-                            hash = hash.wrapping_mul(1103515245).wrapping_add(12345);
+                            hash = hash.wrapping_mul(1_103_515_245).wrapping_add(12_345);
                         }
                         hash
                     });

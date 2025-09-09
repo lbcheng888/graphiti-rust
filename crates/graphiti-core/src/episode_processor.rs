@@ -1453,19 +1453,32 @@ Extract relationships now:"#,
         edges: &[Edge],
         stats: &mut ProcessingStats,
     ) -> Result<()> {
-        // Store entities
-        for entity in entities {
-            if let Err(e) = self.storage.create_node(entity).await {
-                warn!("Failed to store entity '{}': {}", entity.name, e);
-                stats.errors_encountered += 1;
+        // Prefer batched writes for throughput; fallback到单条
+        if !entities.is_empty() {
+            let boxed: Vec<Box<dyn crate::graph::Node>> = entities
+                .iter()
+                .map(|e| Box::new(e.clone()) as Box<dyn crate::graph::Node>)
+                .collect();
+            if let Err(e) = self.storage.create_nodes_batch(&boxed).await {
+                warn!("Batch create_nodes failed: {} — falling back", e);
+                for entity in entities {
+                    if let Err(e) = self.storage.create_node(entity).await {
+                        warn!("Failed to store entity '{}': {}", entity.name, e);
+                        stats.errors_encountered += 1;
+                    }
+                }
             }
         }
 
-        // Store edges
-        for edge in edges {
-            if let Err(e) = self.storage.create_edge(edge).await {
-                warn!("Failed to store edge '{}': {}", edge.id, e);
-                stats.errors_encountered += 1;
+        if !edges.is_empty() {
+            if let Err(e) = self.storage.create_edges_batch(edges).await {
+                warn!("Batch create_edges failed: {} — falling back", e);
+                for edge in edges {
+                    if let Err(e) = self.storage.create_edge(edge).await {
+                        warn!("Failed to store edge '{}': {}", edge.id, e);
+                        stats.errors_encountered += 1;
+                    }
+                }
             }
         }
 

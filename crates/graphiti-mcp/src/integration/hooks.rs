@@ -162,7 +162,6 @@ impl ToolHook for GraphitiHook {
                 }
             }
             "Grep" | "Glob" => {
-                // Record search patterns for context
                 if let Some(pattern) = params.get("pattern").and_then(|p| p.as_str()) {
                     debug!("Recording search pattern: {}", pattern);
                 }

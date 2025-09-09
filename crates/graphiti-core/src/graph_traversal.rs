@@ -72,7 +72,7 @@ pub struct GraphTraversal<S>
 where
     S: GraphStorage,
 {
-    storage: S,
+    storage: std::sync::Arc<S>,
 }
 
 impl<S> GraphTraversal<S>
@@ -80,7 +80,7 @@ where
     S: GraphStorage<Error = Error>,
 {
     /// Create a new graph traversal instance
-    pub fn new(storage: S) -> Self {
+    pub fn new(storage: std::sync::Arc<S>) -> Self {
         Self { storage }
     }
 

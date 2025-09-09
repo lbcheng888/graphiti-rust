@@ -569,7 +569,7 @@ where
         let mut suggestions = Vec::new();
 
         for stat in stats.values() {
-            if stat.avg_execution_time_us > 1000000 {
+            if stat.avg_execution_time_us > 1_000_000 {
                 // > 1 second
                 suggestions.push(format!(
                     "Query pattern {} is slow (avg: {}ms). Consider adding indexes or optimizing query structure.",

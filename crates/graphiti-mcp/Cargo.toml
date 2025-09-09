@@ -26,7 +26,7 @@ async-trait.workspace = true
 
 # Web
 axum.workspace = true
-tower.workspace = true
+tower = { workspace = true, features = ["retry", "timeout", "util", "buffer", "limit", "load-shed"] }
 # Enable extra features required by imports in main.rs
 tower-http = { workspace = true, features = ["trace", "cors", "timeout", "limit"] }
 futures-util = "0.3"

@@ -59,7 +59,7 @@ use graphiti_llm::QwenCandleClient;
 use graphiti_llm::QwenCandleConfig;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_exporter_prometheus::PrometheusHandle;
-use nonzero_ext::nonzero;
+// use nonzero_ext::nonzero; // no longer used
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -74,6 +74,8 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::DefaultMakeSpan;
 use tower_http::trace::TraceLayer;
+// Tower core layers for production hardening
+use tower::limit::GlobalConcurrencyLimitLayer;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
@@ -82,6 +84,8 @@ use tracing_subscriber::util::SubscriberInitExt;
 use uuid::Uuid;
 // NonZeroU32 is not used; remove import to silence warning
 use std::sync::Arc as StdArc;
+use std::num::NonZeroU32;
+// metrics middleware removed for compatibility; keep exporter via init_metrics
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
@@ -145,6 +149,21 @@ struct ServerSettings {
     /// Enable TLS with provided certificates
     #[serde(default)]
     pub tls: Option<TlsSettings>,
+    /// Maximum number of in-flight requests allowed
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+    /// Optional global requests-per-second rate limit
+    #[serde(default = "default_requests_per_second")]
+    pub requests_per_second: u32,
+    /// Per-request timeout in seconds
+    #[serde(default = "default_request_timeout_seconds")]
+    pub request_timeout_seconds: u64,
+    /// Max request body size in bytes
+    #[serde(default = "default_request_body_limit_bytes")]
+    pub request_body_limit_bytes: usize,
+    /// Buffer capacity for pending requests before load shedding
+    #[serde(default = "default_buffer_capacity")]
+    pub buffer_capacity: usize,
 }
 
 impl Default for ServerSettings {
@@ -153,9 +172,21 @@ impl Default for ServerSettings {
             host: "0.0.0.0".to_string(),
             port: 8080,
             tls: None,
+            max_connections: default_max_connections(),
+            requests_per_second: default_requests_per_second(),
+            request_timeout_seconds: default_request_timeout_seconds(),
+            request_body_limit_bytes: default_request_body_limit_bytes(),
+            buffer_capacity: default_buffer_capacity(),
         }
     }
 }
+
+// Defaults for new server settings
+const fn default_max_connections() -> usize { 100 }
+const fn default_requests_per_second() -> u32 { 50 }
+const fn default_request_timeout_seconds() -> u64 { 30 }
+const fn default_request_body_limit_bytes() -> usize { 1 * 1024 * 1024 }
+const fn default_buffer_capacity() -> usize { 1024 }
 
 /// TLS settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -645,7 +676,9 @@ async fn main() -> anyhow::Result<()> {
         notification_manager,
         notification_receiver: Arc::new(tokio::sync::RwLock::new(Some(notification_receiver))),
         project_scanner: project_scanner.clone(),
-        rate_limiter: StdArc::new(RateLimiter::direct(Quota::per_second(nonzero!(50u32)))),
+        rate_limiter: StdArc::new(RateLimiter::direct(Quota::per_second(
+            NonZeroU32::new(config.server.requests_per_second).unwrap_or(NonZeroU32::new(1).unwrap()),
+        ))),
         auth_token: std::env::var("GRAPHITI_AUTH_TOKEN").ok(),
     };
 
@@ -677,6 +710,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Build router
+    // Build core router
     let app = Router::new()
         .route("/mcp", post(mcp_handler)) // Use standard MCP handler with all tools
         .route("/notifications", get(learning_notifications_stream)) // Learning notifications stream
@@ -694,8 +728,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/metrics", get(metrics))
         .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default()))
         .layer(build_cors_layer())
-        .layer(RequestBodyLimitLayer::new(1 * 1024 * 1024))
-        .layer(TimeoutLayer::new(Duration::from_secs(30)))
+        // Core hardening stack
+        .layer(GlobalConcurrencyLimitLayer::new(
+            config.server.max_connections,
+        ))
+        .layer(TimeoutLayer::new(Duration::from_secs(
+            config.server.request_timeout_seconds,
+        )))
+        .layer(RequestBodyLimitLayer::new(
+            config.server.request_body_limit_bytes,
+        ))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             rate_limit_guard,
@@ -723,19 +765,30 @@ async fn main() -> anyhow::Result<()> {
             match reader.read_line(&mut line).await {
                 Ok(0) => break, // EOF
                 Ok(_) => {
-                    // Process MCP request using existing handler
+                    // Process MCP request using existing handler with timeout
                     if let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) {
-                        match mcp_handler(State(state.clone()), Json(request)).await {
-                            Ok(Json(response)) => {
+                        let timeout = Duration::from_secs(config.server.request_timeout_seconds);
+                        match tokio::time::timeout(timeout, mcp_handler(State(state.clone()), Json(request))).await {
+                            Ok(Ok(Json(response))) => {
                                 let response_json = serde_json::to_string(&response)?;
                                 stdout.write_all(response_json.as_bytes()).await?;
                                 stdout.write_all(b"\n").await?;
                                 stdout.flush().await?;
                             }
-                            Err(e) => {
+                            Ok(Err(e)) => {
                                 let error_response = serde_json::json!({
                                     "jsonrpc": "2.0",
                                     "error": {"code": -1, "message": format!("Error: {:?}", e)}
+                                });
+                                let response_json = serde_json::to_string(&error_response)?;
+                                stdout.write_all(response_json.as_bytes()).await?;
+                                stdout.write_all(b"\n").await?;
+                                stdout.flush().await?;
+                            }
+                            Err(_elapsed) => {
+                                let error_response = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "error": {"code": -1, "message": "Request timed out"}
                                 });
                                 let response_json = serde_json::to_string(&error_response)?;
                                 stdout.write_all(response_json.as_bytes()).await?;
@@ -775,13 +828,27 @@ async fn main() -> anyhow::Result<()> {
             let tls_config = RustlsConfig::from_pem_file(&tls.cert_path, &tls.key_path)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to load TLS certs: {}", e))?;
-            axum_server::bind_rustls(addr, tls_config)
-                .serve(app.into_make_service())
-                .await?;
+            let server = axum_server::bind_rustls(addr, tls_config).serve(app.into_make_service());
+            let graceful = async move {
+                tokio::select! {
+                    res = server => res?,
+                    _ = shutdown_signal() => {}
+                }
+                Ok::<(), anyhow::Error>(())
+            };
+            graceful.await?;
         } else {
             info!("Starting MCP server on {}", addr);
             let listener = tokio::net::TcpListener::bind(&addr).await?;
-            axum::serve(listener, app).await?;
+            let server = axum::serve(listener, app);
+            let graceful = async move {
+                tokio::select! {
+                    res = server => res?,
+                    _ = shutdown_signal() => {}
+                }
+                Ok::<(), anyhow::Error>(())
+            };
+            graceful.await?;
         }
     }
 
@@ -942,7 +1009,7 @@ port = 8080
 max_connections = 100
 
 [cozo]
-engine = "mem"
+engine = "sqlite"
 path = ""
 options = {}
 
@@ -2087,10 +2154,7 @@ async fn rate_limit_guard(
     req: HttpRequest<Body>,
     next: middleware::Next,
 ) -> std::result::Result<Response, StatusCode> {
-    state
-        .rate_limiter
-        .check()
-        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
+    if state.rate_limiter.check().is_err() { return Err(StatusCode::TOO_MANY_REQUESTS); }
     Ok(next.run(req).await)
 }
 
@@ -2101,9 +2165,7 @@ async fn auth_guard(
 ) -> std::result::Result<Response, StatusCode> {
     if let Some(expected) = &state.auth_token {
         let headers = req.headers();
-        if !is_authorized(headers, expected) {
-            return Err(StatusCode::UNAUTHORIZED);
-        }
+        if !is_authorized(headers, expected) { return Err(StatusCode::UNAUTHORIZED); }
     }
     Ok(next.run(req).await)
 }
@@ -2117,6 +2179,32 @@ fn is_authorized(headers: &HeaderMap, expected: &str) -> bool {
         }
     }
     false
+}
+
+// metrics middleware intentionally omitted to avoid macro compatibility issues
+
+/// Graceful shutdown signal handler for production
+async fn shutdown_signal() {
+    // Listen for SIGINT, SIGTERM and Ctrl+C
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        sigterm.recv().await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    info!("Shutdown signal received. Shutting down gracefully...");
 }
 
 /// Add memory endpoint

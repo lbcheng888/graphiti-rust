@@ -66,7 +66,7 @@ pub enum SearchOrdering {
     Property(String),
     /// Order by node degree (number of connections)
     Degree,
-    /// Order by PageRank score
+    /// Order by `PageRank` score
     PageRank,
     /// Order by community centrality
     Centrality,
@@ -224,6 +224,11 @@ where
     }
 
     /// Perform advanced search with complex graph traversal
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if underlying storage operations fail or if scoring
+    /// computations that rely on storage cannot complete.
     pub async fn search(&self, query: &str) -> Result<Vec<SearchResult>> {
         // Step 1: Initial text-based search
         let initial_candidates = self.text_search(query).await?;
@@ -349,21 +354,21 @@ where
     async fn apply_filters<'a>(
         &self,
         candidates: &'a [Box<dyn Node>],
-    ) -> Result<Vec<&'a Box<dyn Node>>> {
+    ) -> Result<Vec<&'a dyn Node>> {
         let mut filtered = Vec::new();
 
         for node in candidates {
             let mut passes_all_filters = true;
 
             for filter in &self.config.filters {
-                if !self.node_passes_filter(node, filter).await? {
+                if !self.node_passes_filter(&**node, filter).await? {
                     passes_all_filters = false;
                     break;
                 }
             }
 
             if passes_all_filters {
-                filtered.push(node);
+                filtered.push(&**node);
             }
         }
 
@@ -371,11 +376,7 @@ where
     }
 
     /// Check if a node passes a specific filter
-    async fn node_passes_filter(
-        &self,
-        node: &Box<dyn Node>,
-        filter: &SearchFilter,
-    ) -> Result<bool> {
+    async fn node_passes_filter(&self, node: &dyn Node, filter: &SearchFilter) -> Result<bool> {
         match filter {
             SearchFilter::NodeType(node_type) => {
                 // Check if node labels contain the specified type
@@ -422,13 +423,13 @@ where
     /// Calculate comprehensive scores for candidates
     async fn calculate_comprehensive_scores(
         &self,
-        candidates: &[&Box<dyn Node>],
+        candidates: &[&dyn Node],
         query: &str,
     ) -> Result<Vec<SearchResult>> {
         let mut results = Vec::new();
 
         for node in candidates {
-            let score_breakdown = self.calculate_score_breakdown(node, query).await?;
+            let score_breakdown = self.calculate_score_breakdown(*node, query).await?;
             let overall_score = self.calculate_overall_score(&score_breakdown);
 
             let result = SearchResult {
@@ -454,11 +455,11 @@ where
     /// Calculate detailed score breakdown
     async fn calculate_score_breakdown(
         &self,
-        node: &Box<dyn Node>,
+        node: &dyn Node,
         query: &str,
     ) -> Result<ScoreBreakdown> {
         Ok(ScoreBreakdown {
-            text_similarity: self.calculate_text_similarity(node, query),
+            text_similarity: Self::calculate_text_similarity(node, query),
             semantic_similarity: self.calculate_semantic_similarity(node, query).await?,
             centrality: self.calculate_centrality_score(node).await?,
             recency: self.calculate_recency_score(node).await?,
@@ -468,7 +469,7 @@ where
     }
 
     /// Calculate text similarity score
-    fn calculate_text_similarity(&self, node: &Box<dyn Node>, query: &str) -> f64 {
+    fn calculate_text_similarity(node: &dyn Node, query: &str) -> f64 {
         let node_text = node.properties().to_string().to_lowercase();
         let query_lower = query.to_lowercase();
 
@@ -487,39 +488,35 @@ where
     }
 
     /// Calculate semantic similarity score
-    async fn calculate_semantic_similarity(
-        &self,
-        _node: &Box<dyn Node>,
-        _query: &str,
-    ) -> Result<f64> {
+    async fn calculate_semantic_similarity(&self, _node: &dyn Node, _query: &str) -> Result<f64> {
         // This would require embedding comparison
         // For now, return a placeholder
         Ok(0.5)
     }
 
     /// Calculate centrality score
-    async fn calculate_centrality_score(&self, _node: &Box<dyn Node>) -> Result<f64> {
+    async fn calculate_centrality_score(&self, _node: &dyn Node) -> Result<f64> {
         // This would calculate various centrality measures
         // For now, return a placeholder since we don't have get_edges_for_node
         Ok(0.5)
     }
 
     /// Calculate recency score
-    async fn calculate_recency_score(&self, _node: &Box<dyn Node>) -> Result<f64> {
+    async fn calculate_recency_score(&self, _node: &dyn Node) -> Result<f64> {
         // This would use temporal metadata
         // For now, return a placeholder
         Ok(0.5)
     }
 
     /// Calculate degree score
-    async fn calculate_degree_score(&self, _node: &Box<dyn Node>) -> Result<f64> {
+    async fn calculate_degree_score(&self, _node: &dyn Node) -> Result<f64> {
         // This would calculate actual degree from edges
         // For now, return a placeholder
         Ok(0.5)
     }
 
     /// Calculate community relevance score
-    async fn calculate_community_relevance(&self, _node: &Box<dyn Node>) -> Result<f64> {
+    async fn calculate_community_relevance(&self, _node: &dyn Node) -> Result<f64> {
         // This would require community detection results
         // For now, return a placeholder
         Ok(0.5)

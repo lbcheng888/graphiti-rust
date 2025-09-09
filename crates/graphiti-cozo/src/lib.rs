@@ -7,22 +7,30 @@ use chrono::TimeZone;
 use graphiti_core::error::Error;
 use graphiti_core::error::Result;
 use graphiti_core::graph::Edge;
+// use graphiti_core::graph::EntityNode;
+// use graphiti_core::graph::EpisodeNode;
+// use graphiti_core::graph::CommunityNode;
 use graphiti_core::graph::TemporalMetadata;
 use graphiti_core::storage::Direction;
 use graphiti_core::storage::GraphStorage;
+#[cfg(feature = "backend-cozo")]
+use std::collections::HashMap;
 use std::sync::Arc;
+#[cfg(feature = "backend-cozo")]
+use tokio::sync::Mutex;
+use tokio::sync::Semaphore;
 use tracing::debug;
 use tracing::info;
 use tracing::instrument;
 use tracing::warn;
 use uuid::Uuid;
-#[cfg(feature = "backend-cozo")]
-use std::collections::HashMap;
-#[cfg(feature = "backend-cozo")]
-use tokio::sync::Mutex;
 
 #[cfg(feature = "backend-cozo")]
-use cozo::{DbInstance, NamedRows, ScriptMutability};
+use cozo::DbInstance;
+#[cfg(feature = "backend-cozo")]
+use cozo::NamedRows;
+#[cfg(feature = "backend-cozo")]
+use cozo::ScriptMutability;
 #[cfg(feature = "backend-sqlx")]
 use sqlx::sqlite::SqlitePoolOptions;
 
@@ -56,6 +64,7 @@ pub struct CozoDriver {
     #[cfg(feature = "backend-cozo")]
     edges_mem: Arc<Mutex<HashMap<Uuid, Edge>>>,
     _config: CozoConfig,
+    write_lock: Arc<Semaphore>,
 }
 
 impl CozoDriver {
@@ -73,6 +82,7 @@ impl CozoDriver {
                 db: Arc::new(db),
                 edges_mem: Arc::new(Mutex::new(HashMap::new())),
                 _config: config,
+                write_lock: Arc::new(Semaphore::new(1)),
             };
             driver.initialize_schema().await?;
             return Ok(driver);
@@ -81,30 +91,36 @@ impl CozoDriver {
         #[cfg(all(feature = "backend-sqlx", not(feature = "backend-cozo")))]
         {
             let url = if config.path == ":memory:" {
+                // In-memory DB: use single connection to avoid isolated DBs per connection.
+                // `cache=shared` is unreliable across multiple connections in some environments; prefer 1 conn.
                 "sqlite::memory:".to_string()
             } else {
                 format!("sqlite://{}", config.path)
             };
+            let max_conns = if config.path == ":memory:" { 1 } else { 5 };
             let pool = SqlitePoolOptions::new()
-                .max_connections(5)
+                .max_connections(max_conns)
                 .connect(&url)
                 .await
                 .map_err(|e| Error::Storage(format!("Failed to connect sqlite (sqlx): {}", e)))?;
-            // Pragmas for durability/performance balance
-            let pragmas = [
-                "PRAGMA journal_mode=WAL",
-                "PRAGMA synchronous=NORMAL",
-                "PRAGMA busy_timeout=5000",
-                "PRAGMA temp_store=MEMORY",
-            ];
-            for p in pragmas.iter() {
-                let _ = sqlx::query(p).execute(&pool).await;
+            // Pragmas for durability/performance balance (file-backed only)
+            if config.path != ":memory:" {
+                let pragmas = [
+                    "PRAGMA journal_mode=WAL",
+                    "PRAGMA synchronous=NORMAL",
+                    "PRAGMA busy_timeout=5000",
+                    "PRAGMA temp_store=MEMORY",
+                ];
+                for p in pragmas.iter() {
+                    let _ = sqlx::query(p).execute(&pool).await;
+                }
             }
             let driver = Self {
                 pool: Arc::new(pool),
                 #[cfg(feature = "backend-cozo")]
                 edges_mem: Arc::new(Mutex::new(HashMap::new())),
                 _config: config,
+                write_lock: Arc::new(Semaphore::new(1)),
             };
             driver.initialize_schema().await?;
             return Ok(driver);
@@ -115,31 +131,80 @@ impl CozoDriver {
             // 双后端同时启用时，根据 engine 选择
             if config.engine == "mem" || config.engine == "rocksdb" {
                 let options_str = config.options.to_string();
-                let db = DbInstance::new(&config.engine, &config.path, &options_str)
-                    .map_err(|e| Error::Storage(format!("Failed to create CozoDB instance: {}", e)))?;
+                let db =
+                    DbInstance::new(&config.engine, &config.path, &options_str).map_err(|e| {
+                        Error::Storage(format!("Failed to create CozoDB instance: {}", e))
+                    })?;
                 // 仍然初始化一个内存 sqlite 连接以满足结构体字段
                 let pool = SqlitePoolOptions::new()
                     .max_connections(1)
                     .connect("sqlite::memory:")
                     .await
-                    .map_err(|e| Error::Storage(format!("Failed to connect sqlite (sqlx): {}", e)))?;
-                let driver = Self { db: Arc::new(db), pool: Arc::new(pool), edges_mem: Arc::new(Mutex::new(HashMap::new())), _config: config };
+                    .map_err(|e| {
+                        Error::Storage(format!("Failed to connect sqlite (sqlx): {}", e))
+                    })?;
+                let driver = Self {
+                    db: Arc::new(db),
+                    pool: Arc::new(pool),
+                    edges_mem: Arc::new(Mutex::new(HashMap::new())),
+                    _config: config,
+                    write_lock: Arc::new(Semaphore::new(1)),
+                };
                 driver.initialize_schema().await?;
                 return Ok(driver);
             } else {
-                let url = if config.path == ":memory:" { "sqlite::memory:".to_string() } else { format!("sqlite://{}", config.path) };
-                let pool = SqlitePoolOptions::new().max_connections(5).connect(&url).await
-                    .map_err(|e| Error::Storage(format!("Failed to connect sqlite (sqlx): {}", e)))?;
+                let url = if config.path == ":memory:" {
+                    "sqlite::memory:".to_string()
+                } else {
+                    format!("sqlite://{}", config.path)
+                };
+                let pool = SqlitePoolOptions::new()
+                    .max_connections(5)
+                    .connect(&url)
+                    .await
+                    .map_err(|e| {
+                        Error::Storage(format!("Failed to connect sqlite (sqlx): {}", e))
+                    })?;
                 // 仍然初始化一个内存 Cozo 引擎以满足结构体字段
-                let db = DbInstance::new("mem", "", "{}")
-                    .map_err(|e| Error::Storage(format!("Failed to create CozoDB instance: {}", e)))?;
-                let driver = Self { db: Arc::new(db), pool: Arc::new(pool), edges_mem: Arc::new(Mutex::new(HashMap::new())), _config: config };
+                let db = DbInstance::new("mem", "", "{}").map_err(|e| {
+                    Error::Storage(format!("Failed to create CozoDB instance: {}", e))
+                })?;
+                let driver = Self {
+                    db: Arc::new(db),
+                    pool: Arc::new(pool),
+                    edges_mem: Arc::new(Mutex::new(HashMap::new())),
+                    _config: config,
+                    write_lock: Arc::new(Semaphore::new(1)),
+                };
                 driver.initialize_schema().await?;
                 return Ok(driver);
             }
         }
 
         Err(Error::Storage("no backend selected".to_string()))
+    }
+
+    /// Compact the underlying SQLite database (VACUUM) when file-backed.
+    /// No-op for in-memory or non-sqlite engines.
+    pub async fn compact(&self) -> Result<()> {
+        if self._config.engine == "mem" || self._config.engine == "rocksdb" {
+            return Ok(());
+        }
+        #[cfg(feature = "backend-sqlx")]
+        {
+            if self._config.path == ":memory:" {
+                return Ok(());
+            }
+            sqlx::query("VACUUM")
+                .execute(&*self.pool)
+                .await
+                .map_err(|e| Error::Storage(format!("VACUUM failed: {}", e)))?;
+            return Ok(());
+        }
+        #[cfg(not(feature = "backend-sqlx"))]
+        {
+            return Ok(());
+        }
     }
 
     /// Initialize the database schema for Graphiti (idempotent)
@@ -164,10 +229,17 @@ impl CozoDriver {
                 // Useful indices for recent queries and retention pruning
                 "CREATE INDEX IF NOT EXISTS idx_edges_created_at ON edges(created_at)",
                 "CREATE INDEX IF NOT EXISTS idx_edges_rel_created ON edges(relationship, created_at)",
+                // Minimal node tables (entity/episode/community)
+                "CREATE TABLE IF NOT EXISTS entity_nodes (id TEXT PRIMARY KEY, name TEXT NOT NULL, entity_type TEXT NOT NULL, labels TEXT NOT NULL, properties TEXT NOT NULL, created_at REAL NOT NULL, valid_from REAL NOT NULL, valid_to REAL, expired_at REAL, embedding BLOB)",
+                "CREATE TABLE IF NOT EXISTS episode_nodes (id TEXT PRIMARY KEY, name TEXT NOT NULL, content TEXT NOT NULL, source TEXT NOT NULL, episode_type TEXT NOT NULL, created_at REAL NOT NULL, valid_from REAL NOT NULL, valid_to REAL, expired_at REAL, embedding BLOB)",
+                "CREATE TABLE IF NOT EXISTS community_nodes (id TEXT PRIMARY KEY, name TEXT NOT NULL, summary TEXT NOT NULL, members TEXT NOT NULL, metadata TEXT NOT NULL, created_at REAL NOT NULL, valid_from REAL NOT NULL, valid_to REAL, expired_at REAL)",
+                "CREATE INDEX IF NOT EXISTS idx_entity_created_at ON entity_nodes(created_at)",
+                "CREATE INDEX IF NOT EXISTS idx_episode_created_at ON episode_nodes(created_at)",
+                "CREATE INDEX IF NOT EXISTS idx_community_created_at ON community_nodes(created_at)",
             ];
             for s in stmts.iter() {
                 sqlx::query(s)
-                    .execute(&* self.pool)
+                    .execute(&*self.pool)
                     .await
                     .map_err(|e| Error::Storage(format!("Failed to create table: {}", e)))?;
             }
@@ -216,8 +288,13 @@ impl CozoDriver {
                 }
                 Err(e) => {
                     let error_msg = e.to_string();
-                    if error_msg.contains("conflicts with an existing one") || error_msg.contains("already exists") {
-                        debug!("Table '{}' already exists, preserving existing data", table_name);
+                    if error_msg.contains("conflicts with an existing one")
+                        || error_msg.contains("already exists")
+                    {
+                        debug!(
+                            "Table '{}' already exists, preserving existing data",
+                            table_name
+                        );
                         Ok(())
                     } else {
                         warn!("Failed to create table '{}': {}", table_name, error_msg);
@@ -228,12 +305,14 @@ impl CozoDriver {
         }
         #[cfg(feature = "backend-sqlx")]
         {
-            let _ = table_name; let _ = schema; // handled in initialize_schema
+            let _ = table_name;
+            let _ = schema; // handled in initialize_schema
             Ok(())
         }
         #[cfg(not(any(feature = "backend-cozo", feature = "backend-sqlx")))]
         {
-            let _ = table_name; let _ = schema;
+            let _ = table_name;
+            let _ = schema;
             Ok(())
         }
     }
@@ -299,15 +378,20 @@ impl CozoDriver {
     /// Get a JSON value from ctx_kv by (ns, k)
     pub async fn kv_get(&self, ns: &str, k: &str) -> Result<Option<serde_json::Value>> {
         #[cfg(feature = "backend-cozo")]
-        { let _ = (ns,k); return Ok(None); }
+        {
+            let _ = (ns, k);
+            return Ok(None);
+        }
         #[cfg(feature = "backend-sqlx")]
         {
-            if let Some(rec) = sqlx::query_scalar::<_, String>("SELECT v FROM ctx_kv WHERE ns=? AND k=?")
-                .bind(ns)
-                .bind(k)
-                .fetch_optional(&* self.pool)
-                .await
-                .map_err(|e| Error::Storage(format!("kv_get failed: {}", e)))? {
+            if let Some(rec) =
+                sqlx::query_scalar::<_, String>("SELECT v FROM ctx_kv WHERE ns=? AND k=?")
+                    .bind(ns)
+                    .bind(k)
+                    .fetch_optional(&*self.pool)
+                    .await
+                    .map_err(|e| Error::Storage(format!("kv_get failed: {}", e)))?
+            {
                 let val: serde_json::Value = serde_json::from_str(&rec)
                     .map_err(|e| Error::Storage(format!("kv_get json parse: {}", e)))?;
                 return Ok(Some(val));
@@ -325,7 +409,10 @@ impl CozoDriver {
     pub async fn file_snapshot_put(&self, ns: &str, path: &str, content: &str) -> Result<()> {
         let updated_at = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
         #[cfg(feature = "backend-cozo")]
-        { let _ = (ns,path,content,updated_at); return Ok(()); }
+        {
+            let _ = (ns, path, content, updated_at);
+            return Ok(());
+        }
         #[cfg(feature = "backend-sqlx")]
         {
             sqlx::query("INSERT INTO file_snapshots(ns,path,content,updated_at) VALUES(?,?,?,?) ON CONFLICT(ns,path) DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at")
@@ -348,15 +435,20 @@ impl CozoDriver {
     /// Get file snapshot content by (ns, path)
     pub async fn file_snapshot_get(&self, ns: &str, path: &str) -> Result<Option<String>> {
         #[cfg(feature = "backend-cozo")]
-        { let _ = (ns,path); return Ok(None); }
+        {
+            let _ = (ns, path);
+            return Ok(None);
+        }
         #[cfg(feature = "backend-sqlx")]
         {
-            let rec = sqlx::query_scalar::<_, String>("SELECT content FROM file_snapshots WHERE ns=? AND path=?")
-                .bind(ns)
-                .bind(path)
-                .fetch_optional(&* self.pool)
-                .await
-                .map_err(|e| Error::Storage(format!("file_snapshot_get failed: {}", e)))?;
+            let rec = sqlx::query_scalar::<_, String>(
+                "SELECT content FROM file_snapshots WHERE ns=? AND path=?",
+            )
+            .bind(ns)
+            .bind(path)
+            .fetch_optional(&*self.pool)
+            .await
+            .map_err(|e| Error::Storage(format!("file_snapshot_get failed: {}", e)))?;
             return Ok(rec);
         }
         #[cfg(not(any(feature = "backend-cozo", feature = "backend-sqlx")))]
@@ -378,53 +470,113 @@ impl GraphStorage for CozoDriver {
         let labels = node.labels();
         let properties = node.properties();
         let temporal = node.temporal();
-
         let (created_at, valid_from, valid_to, expired_at) = self.temporal_to_timestamps(temporal);
 
-        // In mem/rocksdb engines, skip Cozo script execution entirely
-        #[cfg(feature = "backend-cozo")]
+        // memory engines: no-op
         if self._config.engine == "mem" || self._config.engine == "rocksdb" {
-            debug!("[mem] create_node skipped scripts for {}", id);
-            return Ok(());
-        }
-
-        // Determine node type and insert accordingly
-        if labels.contains(&"Entity".to_string()) {
-            // This is an entity node
-            let _script = format!(
-                r#"
-                ?[id, name, entity_type, labels, properties, created_at, valid_from, valid_to, expired_at, embedding] <- [[
-                    to_uuid("{}"), "{}", "{}", {}, {}, {}, {}, {}, {}, null
-                ]]
-                :put entity_nodes {{id, name, entity_type, labels, properties, created_at, valid_from, valid_to, expired_at, embedding}}
-                "#,
-                id,
-                properties
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown"),
-                properties
-                    .get("entity_type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown"),
-                serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string()),
-                properties,
-                created_at,
-                valid_from,
-                valid_to
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "null".to_string()),
-                expired_at
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "null".to_string())
-            );
-
             #[cfg(feature = "backend-cozo")]
             {
-                self.execute_script(&script).await?;
+                debug!("[mem] create_node skipped scripts for {}", id);
+                return Ok(());
             }
         }
-        // Add similar logic for Episode and Community nodes...
+
+        #[cfg(feature = "backend-sqlx")]
+        {
+            let _permit = self.write_lock.acquire().await.unwrap();
+            // Decide table by best-effort introspection of properties/labels
+            let labels_json = serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string());
+            if properties.get("episode_type").is_some() || labels.iter().any(|l| l == "Episode") {
+                // EpisodeNode-like
+                let name = properties
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let content = properties
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let source = properties
+                    .get("source")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let episode_type = properties
+                    .get("episode_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                sqlx::query("INSERT INTO episode_nodes(id,name,content,source,episode_type,created_at,valid_from,valid_to,expired_at,embedding) VALUES(?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name,content=excluded.content,source=excluded.source,episode_type=excluded.episode_type,created_at=excluded.created_at,valid_from=excluded.valid_from,valid_to=excluded.valid_to,expired_at=excluded.expired_at,embedding=excluded.embedding")
+                    .bind(id.to_string())
+                    .bind(name)
+                    .bind(content)
+                    .bind(source)
+                    .bind(episode_type)
+                    .bind(created_at)
+                    .bind(valid_from)
+                    .bind(valid_to)
+                    .bind(expired_at)
+                    .execute(&* self.pool)
+                    .await
+                    .map_err(|e| Error::Storage(format!("Failed to insert episode: {}", e)))?;
+            } else if properties.get("entity_type").is_some()
+                || labels.iter().any(|l| l == "Entity")
+            {
+                // EntityNode-like
+                let name = properties
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let entity_type = properties
+                    .get("entity_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                sqlx::query("INSERT INTO entity_nodes(id,name,entity_type,labels,properties,created_at,valid_from,valid_to,expired_at,embedding) VALUES(?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name,entity_type=excluded.entity_type,labels=excluded.labels,properties=excluded.properties,created_at=excluded.created_at,valid_from=excluded.valid_from,valid_to=excluded.valid_to,expired_at=excluded.expired_at,embedding=excluded.embedding")
+                    .bind(id.to_string())
+                    .bind(name)
+                    .bind(entity_type)
+                    .bind(labels_json)
+                    .bind(properties.to_string())
+                    .bind(created_at)
+                    .bind(valid_from)
+                    .bind(valid_to)
+                    .bind(expired_at)
+                    .execute(&* self.pool)
+                    .await
+                    .map_err(|e| Error::Storage(format!("Failed to insert entity: {}", e)))?;
+            } else {
+                // Community or generic
+                let name = properties
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let summary = properties
+                    .get("summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let members = properties
+                    .get("members")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]))
+                    .to_string();
+                let metadata = properties
+                    .get("metadata")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}))
+                    .to_string();
+                sqlx::query("INSERT INTO community_nodes(id,name,summary,members,metadata,created_at,valid_from,valid_to,expired_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,summary=excluded.summary,members=excluded.members,metadata=excluded.metadata,created_at=excluded.created_at,valid_from=excluded.valid_from,valid_to=excluded.valid_to,expired_at=excluded.expired_at")
+                    .bind(id.to_string())
+                    .bind(name)
+                    .bind(summary)
+                    .bind(members)
+                    .bind(metadata)
+                    .bind(created_at)
+                    .bind(valid_from)
+                    .bind(valid_to)
+                    .bind(expired_at)
+                    .execute(&* self.pool)
+                    .await
+                    .map_err(|e| Error::Storage(format!("Failed to insert community: {}", e)))?;
+            }
+        }
 
         debug!("Created node with ID: {}", id);
         Ok(())
@@ -449,11 +601,111 @@ impl GraphStorage for CozoDriver {
         );
 
         #[cfg(feature = "backend-cozo")]
-let _result = self.query_script(&script).await?;
+        let _result = self.query_script(&script).await?;
 
         // For now, return None as we need to implement proper node reconstruction
         debug!("Queried node with ID: {}", id);
         Ok(None)
+    }
+
+    #[instrument(skip(self, nodes))]
+    async fn create_nodes_batch(
+        &self,
+        nodes: &[Box<dyn graphiti_core::graph::Node>],
+    ) -> Result<()> {
+        if nodes.is_empty() {
+            return Ok(());
+        }
+        if self._config.engine == "mem" || self._config.engine == "rocksdb" {
+            #[cfg(feature = "backend-cozo")]
+            {
+                return Ok(());
+            }
+        }
+        #[cfg(feature = "backend-sqlx")]
+        {
+            let _permit = self.write_lock.acquire().await.unwrap();
+            let mut tx = self.pool.begin().await.map_err(|e| {
+                Error::Storage(format!("Failed to begin transaction (nodes): {}", e))
+            })?;
+            for n in nodes {
+                let id = *n.id();
+                let labels = n.labels();
+                let properties = n.properties();
+                let (created_at, valid_from, valid_to, expired_at) =
+                    self.temporal_to_timestamps(n.temporal());
+                let labels_json =
+                    serde_json::to_string(&labels).unwrap_or_else(|_| "[]".to_string());
+                if properties.get("episode_type").is_some() || labels.iter().any(|l| l == "Episode")
+                {
+                    let name = properties
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let content = properties
+                        .get("content")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let source = properties
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let episode_type = properties
+                        .get("episode_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    sqlx::query("INSERT INTO episode_nodes(id,name,content,source,episode_type,created_at,valid_from,valid_to,expired_at,embedding) VALUES(?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name,content=excluded.content,source=excluded.source,episode_type=excluded.episode_type,created_at=excluded.created_at,valid_from=excluded.valid_from,valid_to=excluded.valid_to,expired_at=excluded.expired_at,embedding=excluded.embedding")
+                        .bind(id.to_string()).bind(name).bind(content).bind(source).bind(episode_type)
+                        .bind(created_at).bind(valid_from).bind(valid_to).bind(expired_at)
+                        .execute(&mut *tx).await
+                        .map_err(|e| Error::Storage(format!("batch node insert (episode) failed: {}", e)))?;
+                } else if properties.get("entity_type").is_some()
+                    || labels.iter().any(|l| l == "Entity")
+                {
+                    let name = properties
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let entity_type = properties
+                        .get("entity_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    sqlx::query("INSERT INTO entity_nodes(id,name,entity_type,labels,properties,created_at,valid_from,valid_to,expired_at,embedding) VALUES(?,?,?,?,?,?,?,?,?,NULL) ON CONFLICT(id) DO UPDATE SET name=excluded.name,entity_type=excluded.entity_type,labels=excluded.labels,properties=excluded.properties,created_at=excluded.created_at,valid_from=excluded.valid_from,valid_to=excluded.valid_to,expired_at=excluded.expired_at,embedding=excluded.embedding")
+                        .bind(id.to_string()).bind(name).bind(entity_type).bind(labels_json).bind(properties.to_string())
+                        .bind(created_at).bind(valid_from).bind(valid_to).bind(expired_at)
+                        .execute(&mut *tx).await
+                        .map_err(|e| Error::Storage(format!("batch node insert (entity) failed: {}", e)))?;
+                } else {
+                    let name = properties
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let summary = properties
+                        .get("summary")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let members = properties
+                        .get("members")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!([]))
+                        .to_string();
+                    let metadata = properties
+                        .get("metadata")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}))
+                        .to_string();
+                    sqlx::query("INSERT INTO community_nodes(id,name,summary,members,metadata,created_at,valid_from,valid_to,expired_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,summary=excluded.summary,members=excluded.members,metadata=excluded.metadata,created_at=excluded.created_at,valid_from=excluded.valid_from,valid_to=excluded.valid_to,expired_at=excluded.expired_at")
+                        .bind(id.to_string()).bind(name).bind(summary).bind(members).bind(metadata)
+                        .bind(created_at).bind(valid_from).bind(valid_to).bind(expired_at)
+                        .execute(&mut *tx).await
+                        .map_err(|e| Error::Storage(format!("batch node insert (community) failed: {}", e)))?;
+                }
+            }
+            tx.commit()
+                .await
+                .map_err(|e| Error::Storage(format!("commit nodes batch failed: {}", e)))?;
+        }
+        Ok(())
     }
 
     #[instrument(skip(self, node))]
@@ -483,7 +735,7 @@ let _result = self.query_script(&script).await?;
 
         #[cfg(feature = "backend-cozo")]
         {
-            self.execute_script(&script).await? ;
+            self.execute_script(&script).await?;
         }
         debug!("Deleted node with ID: {}", id);
         Ok(())
@@ -507,8 +759,9 @@ let _result = self.query_script(&script).await?;
         } else {
             #[cfg(feature = "backend-sqlx")]
             {
+                let _permit = self.write_lock.acquire().await.unwrap();
                 let props = edge.properties.to_string();
-                sqlx::query("INSERT OR REPLACE INTO edges(id,source_id,target_id,relationship,properties,created_at,valid_from,valid_to,expired_at,weight) VALUES(?,?,?,?,?,?,?,?,?,?)")
+                sqlx::query("INSERT INTO edges(id,source_id,target_id,relationship,properties,created_at,valid_from,valid_to,expired_at,weight) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source_id=excluded.source_id,target_id=excluded.target_id,relationship=excluded.relationship,properties=excluded.properties,created_at=excluded.created_at,valid_from=excluded.valid_from,valid_to=excluded.valid_to,expired_at=excluded.expired_at,weight=excluded.weight")
                     .bind(edge.id.to_string())
                     .bind(edge.source_id.to_string())
                     .bind(edge.target_id.to_string())
@@ -555,16 +808,16 @@ let _result = self.query_script(&script).await?;
         } else {
             #[cfg(feature = "backend-sqlx")]
             {
-                let mut tx = self
-                    .pool
-                    .begin()
-                    .await
-                    .map_err(|e| Error::Storage(format!("Failed to begin transaction: {}", e)))?;
+                let _permit = self.write_lock.acquire().await.unwrap();
+                let mut tx =
+                    self.pool.begin().await.map_err(|e| {
+                        Error::Storage(format!("Failed to begin transaction: {}", e))
+                    })?;
                 for edge in edges {
                     let (created_at, valid_from, valid_to, expired_at) =
                         self.temporal_to_timestamps(&edge.temporal);
                     let props = edge.properties.to_string();
-                    sqlx::query("INSERT OR REPLACE INTO edges(id,source_id,target_id,relationship,properties,created_at,valid_from,valid_to,expired_at,weight) VALUES(?,?,?,?,?,?,?,?,?,?)")
+                    sqlx::query("INSERT INTO edges(id,source_id,target_id,relationship,properties,created_at,valid_from,valid_to,expired_at,weight) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source_id=excluded.source_id,target_id=excluded.target_id,relationship=excluded.relationship,properties=excluded.properties,created_at=excluded.created_at,valid_from=excluded.valid_from,valid_to=excluded.valid_to,expired_at=excluded.expired_at,weight=excluded.weight")
                         .bind(edge.id.to_string())
                         .bind(edge.source_id.to_string())
                         .bind(edge.target_id.to_string())
@@ -597,8 +850,8 @@ let _result = self.query_script(&script).await?;
         if !(self._config.engine == "mem" || self._config.engine == "rocksdb") {
             #[cfg(feature = "backend-sqlx")]
             {
-            use sqlx::Row;
-            let row_opt = sqlx::query(
+                use sqlx::Row;
+                let row_opt = sqlx::query(
                 "SELECT id, source_id, target_id, relationship, properties, created_at, valid_from, valid_to, expired_at, weight FROM edges WHERE id = ?"
             )
             .bind(id.to_string())
@@ -606,53 +859,71 @@ let _result = self.query_script(&script).await?;
             .await
             .map_err(|e| Error::Storage(format!("get_edge_by_id failed: {}", e)))?;
 
-            if let Some(r) = row_opt {
-                let id_s: String = r.get("id");
-                let src_s: String = r.get("source_id");
-                let tgt_s: String = r.get("target_id");
-                let rel: String = r.get("relationship");
-                let props_s: String = r.get("properties");
-                let created_at_f: f64 = r.get("created_at");
-                let valid_from_f: f64 = r.get("valid_from");
-                let valid_to_o: Option<f64> = r.try_get("valid_to").ok();
-                let expired_at_o: Option<f64> = r.try_get("expired_at").ok();
-                let weight_f: f64 = r.get("weight");
+                if let Some(r) = row_opt {
+                    let id_s: String = r.get("id");
+                    let src_s: String = r.get("source_id");
+                    let tgt_s: String = r.get("target_id");
+                    let rel: String = r.get("relationship");
+                    let props_s: String = r.get("properties");
+                    let created_at_f: f64 = r.get("created_at");
+                    let valid_from_f: f64 = r.get("valid_from");
+                    let valid_to_o: Option<f64> = r.try_get("valid_to").ok();
+                    let expired_at_o: Option<f64> = r.try_get("expired_at").ok();
+                    let weight_f: f64 = r.get("weight");
 
-                let props: serde_json::Value = serde_json::from_str(&props_s)
-                    .map_err(|e| Error::Storage(format!("edge.properties parse: {}", e)))?;
+                    let props: serde_json::Value = serde_json::from_str(&props_s)
+                        .map_err(|e| Error::Storage(format!("edge.properties parse: {}", e)))?;
 
-                let edge = Edge {
-                    id: Uuid::parse_str(&id_s).unwrap_or(*id),
-                    source_id: Uuid::parse_str(&src_s).unwrap_or(Uuid::nil()),
-                    target_id: Uuid::parse_str(&tgt_s).unwrap_or(Uuid::nil()),
-                    relationship: rel,
-                    properties: props,
-                    temporal: TemporalMetadata {
-                        created_at: chrono::Utc.timestamp_millis_opt((created_at_f * 1000.0) as i64).single().unwrap_or_else(chrono::Utc::now),
-                        valid_from: chrono::Utc.timestamp_millis_opt((valid_from_f * 1000.0) as i64).single().unwrap_or_else(chrono::Utc::now),
-                        valid_to: valid_to_o.and_then(|v| chrono::Utc.timestamp_millis_opt((v * 1000.0) as i64).single()),
-                        expired_at: expired_at_o.and_then(|v| chrono::Utc.timestamp_millis_opt((v * 1000.0) as i64).single()),
-                    },
-                    weight: weight_f as f32,
-                };
-                return Ok(Some(edge));
-            }
-            return Ok(None);
+                    let edge = Edge {
+                        id: Uuid::parse_str(&id_s).unwrap_or(*id),
+                        source_id: Uuid::parse_str(&src_s).unwrap_or(Uuid::nil()),
+                        target_id: Uuid::parse_str(&tgt_s).unwrap_or(Uuid::nil()),
+                        relationship: rel,
+                        properties: props,
+                        temporal: TemporalMetadata {
+                            created_at: chrono::Utc
+                                .timestamp_millis_opt((created_at_f * 1000.0) as i64)
+                                .single()
+                                .unwrap_or_else(chrono::Utc::now),
+                            valid_from: chrono::Utc
+                                .timestamp_millis_opt((valid_from_f * 1000.0) as i64)
+                                .single()
+                                .unwrap_or_else(chrono::Utc::now),
+                            valid_to: valid_to_o.and_then(|v| {
+                                chrono::Utc
+                                    .timestamp_millis_opt((v * 1000.0) as i64)
+                                    .single()
+                            }),
+                            expired_at: expired_at_o.and_then(|v| {
+                                chrono::Utc
+                                    .timestamp_millis_opt((v * 1000.0) as i64)
+                                    .single()
+                            }),
+                        },
+                        weight: weight_f as f32,
+                    };
+                    return Ok(Some(edge));
+                }
+                return Ok(None);
             }
             #[cfg(not(feature = "backend-sqlx"))]
             {
-                let _ = id; return Ok(None);
+                let _ = id;
+                return Ok(None);
             }
         } else {
             #[cfg(feature = "backend-cozo")]
             {
                 let map = self.edges_mem.lock().await;
-                if let Some(e) = map.get(id) { return Ok(Some(e.clone())); }
+                if let Some(e) = map.get(id) {
+                    return Ok(Some(e.clone()));
+                }
                 return Ok(None);
             }
             #[cfg(not(feature = "backend-cozo"))]
             {
-                let _ = id; return Ok(None);
+                let _ = id;
+                return Ok(None);
             }
         }
     }
@@ -666,19 +937,23 @@ let _result = self.query_script(&script).await?;
                 return Ok(map.remove(id).is_some());
             }
             #[cfg(not(feature = "backend-cozo"))]
-            { return Ok(false); }
+            {
+                return Ok(false);
+            }
         } else {
             #[cfg(feature = "backend-sqlx")]
             {
                 let res = sqlx::query("DELETE FROM edges WHERE id = ?")
                     .bind(id.to_string())
-                    .execute(&* self.pool)
+                    .execute(&*self.pool)
                     .await
                     .map_err(|e| Error::Storage(format!("delete_edge_by_id failed: {}", e)))?;
                 return Ok(res.rows_affected() > 0);
             }
             #[cfg(not(feature = "backend-sqlx"))]
-            { return Ok(false); }
+            {
+                return Ok(false);
+            }
         }
     }
 
@@ -687,8 +962,8 @@ let _result = self.query_script(&script).await?;
         if !(self._config.engine == "mem" || self._config.engine == "rocksdb") {
             #[cfg(feature = "backend-sqlx")]
             {
-            use sqlx::Row;
-            let (sql, bind1, bind2) = match direction {
+                use sqlx::Row;
+                let (sql, bind1, bind2) = match direction {
                 Direction::Outgoing => (
                     "SELECT id, source_id, target_id, relationship, properties, created_at, valid_from, valid_to, expired_at, weight FROM edges WHERE source_id = ?",
                     node_id.to_string(),
@@ -705,53 +980,63 @@ let _result = self.query_script(&script).await?;
                     Some(node_id.to_string()),
                 ),
             };
-            let mut q = sqlx::query(sql).bind(bind1);
-            if let Some(b2) = bind2 { q = q.bind(b2); }
-            let rows = q
-                .fetch_all(&* self.pool)
-                .await
-                .map_err(|e| Error::Storage(format!("get_edges failed: {}", e)))?;
-            let mut out = Vec::new();
-            for r in rows {
-                let id_s: String = r.get("id");
-                let src_s: String = r.get("source_id");
-                let tgt_s: String = r.get("target_id");
-                let rel: String = r.get("relationship");
-                let props_s: String = r.get("properties");
-                let created_at_f: f64 = r.get("created_at");
-                let valid_from_f: f64 = r.get("valid_from");
-                let valid_to_o: Option<f64> = r.try_get("valid_to").ok();
-                let expired_at_o: Option<f64> = r.try_get("expired_at").ok();
-                let weight_f: f64 = r.get("weight");
-                let props: serde_json::Value = serde_json::from_str(&props_s)
-                    .unwrap_or(serde_json::json!({}));
-                out.push(Edge {
-                    id: Uuid::parse_str(&id_s).unwrap_or(Uuid::nil()),
-                    source_id: Uuid::parse_str(&src_s).unwrap_or(Uuid::nil()),
-                    target_id: Uuid::parse_str(&tgt_s).unwrap_or(Uuid::nil()),
-                    relationship: rel,
-                    properties: props,
-                    temporal: TemporalMetadata {
-                        created_at: chrono::Utc
-                            .timestamp_millis_opt((created_at_f * 1000.0) as i64)
-                            .single()
-                            .unwrap_or_else(chrono::Utc::now),
-                        valid_from: chrono::Utc
-                            .timestamp_millis_opt((valid_from_f * 1000.0) as i64)
-                            .single()
-                            .unwrap_or_else(chrono::Utc::now),
-                        valid_to: valid_to_o
-                            .and_then(|v| chrono::Utc.timestamp_millis_opt((v * 1000.0) as i64).single()),
-                        expired_at: expired_at_o
-                            .and_then(|v| chrono::Utc.timestamp_millis_opt((v * 1000.0) as i64).single()),
-                    },
-                    weight: weight_f as f32,
-                });
-            }
-            return Ok(out);
+                let mut q = sqlx::query(sql).bind(bind1);
+                if let Some(b2) = bind2 {
+                    q = q.bind(b2);
+                }
+                let rows = q
+                    .fetch_all(&*self.pool)
+                    .await
+                    .map_err(|e| Error::Storage(format!("get_edges failed: {}", e)))?;
+                let mut out = Vec::new();
+                for r in rows {
+                    let id_s: String = r.get("id");
+                    let src_s: String = r.get("source_id");
+                    let tgt_s: String = r.get("target_id");
+                    let rel: String = r.get("relationship");
+                    let props_s: String = r.get("properties");
+                    let created_at_f: f64 = r.get("created_at");
+                    let valid_from_f: f64 = r.get("valid_from");
+                    let valid_to_o: Option<f64> = r.try_get("valid_to").ok();
+                    let expired_at_o: Option<f64> = r.try_get("expired_at").ok();
+                    let weight_f: f64 = r.get("weight");
+                    let props: serde_json::Value =
+                        serde_json::from_str(&props_s).unwrap_or(serde_json::json!({}));
+                    out.push(Edge {
+                        id: Uuid::parse_str(&id_s).unwrap_or(Uuid::nil()),
+                        source_id: Uuid::parse_str(&src_s).unwrap_or(Uuid::nil()),
+                        target_id: Uuid::parse_str(&tgt_s).unwrap_or(Uuid::nil()),
+                        relationship: rel,
+                        properties: props,
+                        temporal: TemporalMetadata {
+                            created_at: chrono::Utc
+                                .timestamp_millis_opt((created_at_f * 1000.0) as i64)
+                                .single()
+                                .unwrap_or_else(chrono::Utc::now),
+                            valid_from: chrono::Utc
+                                .timestamp_millis_opt((valid_from_f * 1000.0) as i64)
+                                .single()
+                                .unwrap_or_else(chrono::Utc::now),
+                            valid_to: valid_to_o.and_then(|v| {
+                                chrono::Utc
+                                    .timestamp_millis_opt((v * 1000.0) as i64)
+                                    .single()
+                            }),
+                            expired_at: expired_at_o.and_then(|v| {
+                                chrono::Utc
+                                    .timestamp_millis_opt((v * 1000.0) as i64)
+                                    .single()
+                            }),
+                        },
+                        weight: weight_f as f32,
+                    });
+                }
+                return Ok(out);
             }
             #[cfg(not(feature = "backend-sqlx"))]
-            { return Ok(Vec::new()); }
+            {
+                return Ok(Vec::new());
+            }
         } else {
             #[cfg(feature = "backend-cozo")]
             {
@@ -763,7 +1048,9 @@ let _result = self.query_script(&script).await?;
                 return Ok(out);
             }
             #[cfg(not(feature = "backend-cozo"))]
-            { return Ok(Vec::new()); }
+            {
+                return Ok(Vec::new());
+            }
         }
     }
 
@@ -778,46 +1065,62 @@ let _result = self.query_script(&script).await?;
         if !(self._config.engine == "mem" || self._config.engine == "rocksdb") {
             #[cfg(feature = "backend-sqlx")]
             {
-            use sqlx::Row;
-            let rows = sqlx::query(
+                use sqlx::Row;
+                let rows = sqlx::query(
                 "SELECT id, source_id, target_id, relationship, properties, created_at, valid_from, valid_to, expired_at, weight FROM edges ORDER BY created_at DESC LIMIT 2000"
             )
             .fetch_all(&* self.pool)
             .await
             .map_err(|e| Error::Storage(format!("get_all_edges failed: {}", e)))?;
-            let mut out = Vec::new();
-            for r in rows {
-                let id_s: String = r.get("id");
-                let src_s: String = r.get("source_id");
-                let tgt_s: String = r.get("target_id");
-                let rel: String = r.get("relationship");
-                let props_s: String = r.get("properties");
-                let created_at_f: f64 = r.get("created_at");
-                let valid_from_f: f64 = r.get("valid_from");
-                let valid_to_o: Option<f64> = r.try_get("valid_to").ok();
-                let expired_at_o: Option<f64> = r.try_get("expired_at").ok();
-                let weight_f: f64 = r.get("weight");
-                let props: serde_json::Value = serde_json::from_str(&props_s)
-                    .unwrap_or(serde_json::json!({}));
-                out.push(graphiti_core::graph::Edge {
-                    id: Uuid::parse_str(&id_s).unwrap_or_else(|_| Uuid::nil()),
-                    source_id: Uuid::parse_str(&src_s).unwrap_or_else(|_| Uuid::nil()),
-                    target_id: Uuid::parse_str(&tgt_s).unwrap_or_else(|_| Uuid::nil()),
-                    relationship: rel,
-                    properties: props,
-                    temporal: TemporalMetadata {
-                        created_at: chrono::Utc.timestamp_millis_opt((created_at_f * 1000.0) as i64).single().unwrap_or_else(chrono::Utc::now),
-                        valid_from: chrono::Utc.timestamp_millis_opt((valid_from_f * 1000.0) as i64).single().unwrap_or_else(chrono::Utc::now),
-                        valid_to: valid_to_o.and_then(|v| chrono::Utc.timestamp_millis_opt((v * 1000.0) as i64).single()),
-                        expired_at: expired_at_o.and_then(|v| chrono::Utc.timestamp_millis_opt((v * 1000.0) as i64).single()),
-                    },
-                    weight: weight_f as f32,
-                });
-            }
-            return Ok(out);
+                let mut out = Vec::new();
+                for r in rows {
+                    let id_s: String = r.get("id");
+                    let src_s: String = r.get("source_id");
+                    let tgt_s: String = r.get("target_id");
+                    let rel: String = r.get("relationship");
+                    let props_s: String = r.get("properties");
+                    let created_at_f: f64 = r.get("created_at");
+                    let valid_from_f: f64 = r.get("valid_from");
+                    let valid_to_o: Option<f64> = r.try_get("valid_to").ok();
+                    let expired_at_o: Option<f64> = r.try_get("expired_at").ok();
+                    let weight_f: f64 = r.get("weight");
+                    let props: serde_json::Value =
+                        serde_json::from_str(&props_s).unwrap_or(serde_json::json!({}));
+                    out.push(graphiti_core::graph::Edge {
+                        id: Uuid::parse_str(&id_s).unwrap_or_else(|_| Uuid::nil()),
+                        source_id: Uuid::parse_str(&src_s).unwrap_or_else(|_| Uuid::nil()),
+                        target_id: Uuid::parse_str(&tgt_s).unwrap_or_else(|_| Uuid::nil()),
+                        relationship: rel,
+                        properties: props,
+                        temporal: TemporalMetadata {
+                            created_at: chrono::Utc
+                                .timestamp_millis_opt((created_at_f * 1000.0) as i64)
+                                .single()
+                                .unwrap_or_else(chrono::Utc::now),
+                            valid_from: chrono::Utc
+                                .timestamp_millis_opt((valid_from_f * 1000.0) as i64)
+                                .single()
+                                .unwrap_or_else(chrono::Utc::now),
+                            valid_to: valid_to_o.and_then(|v| {
+                                chrono::Utc
+                                    .timestamp_millis_opt((v * 1000.0) as i64)
+                                    .single()
+                            }),
+                            expired_at: expired_at_o.and_then(|v| {
+                                chrono::Utc
+                                    .timestamp_millis_opt((v * 1000.0) as i64)
+                                    .single()
+                            }),
+                        },
+                        weight: weight_f as f32,
+                    });
+                }
+                return Ok(out);
             }
             #[cfg(not(feature = "backend-sqlx"))]
-            { return Ok(Vec::new()); }
+            {
+                return Ok(Vec::new());
+            }
         } else {
             #[cfg(feature = "backend-cozo")]
             {
@@ -825,7 +1128,99 @@ let _result = self.query_script(&script).await?;
                 Ok(map.values().cloned().collect())
             }
             #[cfg(not(feature = "backend-cozo"))]
-            { return Ok(Vec::new()); }
+            {
+                return Ok(Vec::new());
+            }
+        }
+    }
+
+    #[instrument(skip(self))]
+    async fn get_recent_edges_by_rel(
+        &self,
+        relationship: &str,
+        limit: usize,
+    ) -> Result<Vec<graphiti_core::graph::Edge>> {
+        if !(self._config.engine == "mem" || self._config.engine == "rocksdb") {
+            #[cfg(feature = "backend-sqlx")]
+            {
+                use sqlx::Row;
+                let rows = sqlx::query(
+                    "SELECT id, source_id, target_id, relationship, properties, created_at, valid_from, valid_to, expired_at, weight \
+                     FROM edges WHERE relationship = ? ORDER BY created_at DESC LIMIT ?"
+                )
+                .bind(relationship)
+                .bind(limit as i64)
+                .fetch_all(&* self.pool)
+                .await
+                .map_err(|e| Error::Storage(format!("get_recent_edges_by_rel failed: {}", e)))?;
+                let mut out = Vec::new();
+                for r in rows {
+                    let id_s: String = r.get("id");
+                    let src_s: String = r.get("source_id");
+                    let tgt_s: String = r.get("target_id");
+                    let rel: String = r.get("relationship");
+                    let props_s: String = r.get("properties");
+                    let created_at_f: f64 = r.get("created_at");
+                    let valid_from_f: f64 = r.get("valid_from");
+                    let valid_to_o: Option<f64> = r.try_get("valid_to").ok();
+                    let expired_at_o: Option<f64> = r.try_get("expired_at").ok();
+                    let weight_f: f64 = r.get("weight");
+                    let props: serde_json::Value =
+                        serde_json::from_str(&props_s).unwrap_or(serde_json::json!({}));
+                    out.push(graphiti_core::graph::Edge {
+                        id: Uuid::parse_str(&id_s).unwrap_or_else(|_| Uuid::nil()),
+                        source_id: Uuid::parse_str(&src_s).unwrap_or_else(|_| Uuid::nil()),
+                        target_id: Uuid::parse_str(&tgt_s).unwrap_or_else(|_| Uuid::nil()),
+                        relationship: rel,
+                        properties: props,
+                        temporal: TemporalMetadata {
+                            created_at: chrono::Utc
+                                .timestamp_millis_opt((created_at_f * 1000.0) as i64)
+                                .single()
+                                .unwrap_or_else(chrono::Utc::now),
+                            valid_from: chrono::Utc
+                                .timestamp_millis_opt((valid_from_f * 1000.0) as i64)
+                                .single()
+                                .unwrap_or_else(chrono::Utc::now),
+                            valid_to: valid_to_o.and_then(|v| {
+                                chrono::Utc
+                                    .timestamp_millis_opt((v * 1000.0) as i64)
+                                    .single()
+                            }),
+                            expired_at: expired_at_o.and_then(|v| {
+                                chrono::Utc
+                                    .timestamp_millis_opt((v * 1000.0) as i64)
+                                    .single()
+                            }),
+                        },
+                        weight: weight_f as f32,
+                    });
+                }
+                return Ok(out);
+            }
+            #[cfg(not(feature = "backend-sqlx"))]
+            {
+                return Ok(Vec::new());
+            }
+        } else {
+            #[cfg(feature = "backend-cozo")]
+            {
+                let map = self.edges_mem.lock().await;
+                let mut out: Vec<_> = map
+                    .values()
+                    .filter(|e| e.relationship == relationship)
+                    .cloned()
+                    .collect();
+                out.sort_by(|a, b| b.temporal.created_at.cmp(&a.temporal.created_at));
+                if out.len() > limit {
+                    out.truncate(limit);
+                }
+                Ok(out)
+            }
+            #[cfg(not(feature = "backend-cozo"))]
+            {
+                return Ok(Vec::new());
+            }
         }
     }
 
@@ -872,20 +1267,57 @@ let _result = self.query_script(&script).await?;
 impl GraphStorage for CozoDriver {
     type Error = Error;
 
-    async fn create_node(&self, _node: &dyn graphiti_core::graph::Node) -> Result<()> { Ok(()) }
-    async fn get_node(&self, _id: &Uuid) -> Result<Option<Box<dyn graphiti_core::graph::Node>>> { Ok(None) }
-    async fn update_node(&self, _node: &dyn graphiti_core::graph::Node) -> Result<()> { Ok(()) }
-    async fn delete_node(&self, _id: &Uuid) -> Result<()> { Ok(()) }
-    async fn create_edge(&self, _edge: &Edge) -> Result<()> { Ok(()) }
-    async fn get_edge_by_id(&self, _id: &Uuid) -> Result<Option<Edge>> { Ok(None) }
-    async fn delete_edge_by_id(&self, _id: &Uuid) -> Result<bool> { Ok(false) }
-    async fn get_edges(&self, _node_id: &Uuid, _direction: Direction) -> Result<Vec<Edge>> { Ok(Vec::new()) }
-    async fn get_all_nodes(&self) -> Result<Vec<Box<dyn graphiti_core::graph::Node>>> { Ok(Vec::new()) }
-    async fn get_all_edges(&self) -> Result<Vec<graphiti_core::graph::Edge>> { Ok(Vec::new()) }
-    async fn get_nodes_at_time(&self, _timestamp: chrono::DateTime<chrono::Utc>) -> Result<Vec<Box<dyn graphiti_core::graph::Node>>> { Ok(Vec::new()) }
-    async fn get_edges_at_time(&self, _timestamp: chrono::DateTime<chrono::Utc>) -> Result<Vec<graphiti_core::graph::Edge>> { Ok(Vec::new()) }
-    async fn get_node_history(&self, _node_id: &Uuid) -> Result<Vec<Box<dyn graphiti_core::graph::Node>>> { Ok(Vec::new()) }
-    async fn get_edge_history(&self, _edge_id: &Uuid) -> Result<Vec<graphiti_core::graph::Edge>> { Ok(Vec::new()) }
+    async fn create_node(&self, _node: &dyn graphiti_core::graph::Node) -> Result<()> {
+        Ok(())
+    }
+    async fn get_node(&self, _id: &Uuid) -> Result<Option<Box<dyn graphiti_core::graph::Node>>> {
+        Ok(None)
+    }
+    async fn update_node(&self, _node: &dyn graphiti_core::graph::Node) -> Result<()> {
+        Ok(())
+    }
+    async fn delete_node(&self, _id: &Uuid) -> Result<()> {
+        Ok(())
+    }
+    async fn create_edge(&self, _edge: &Edge) -> Result<()> {
+        Ok(())
+    }
+    async fn get_edge_by_id(&self, _id: &Uuid) -> Result<Option<Edge>> {
+        Ok(None)
+    }
+    async fn delete_edge_by_id(&self, _id: &Uuid) -> Result<bool> {
+        Ok(false)
+    }
+    async fn get_edges(&self, _node_id: &Uuid, _direction: Direction) -> Result<Vec<Edge>> {
+        Ok(Vec::new())
+    }
+    async fn get_all_nodes(&self) -> Result<Vec<Box<dyn graphiti_core::graph::Node>>> {
+        Ok(Vec::new())
+    }
+    async fn get_all_edges(&self) -> Result<Vec<graphiti_core::graph::Edge>> {
+        Ok(Vec::new())
+    }
+    async fn get_nodes_at_time(
+        &self,
+        _timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Box<dyn graphiti_core::graph::Node>>> {
+        Ok(Vec::new())
+    }
+    async fn get_edges_at_time(
+        &self,
+        _timestamp: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<graphiti_core::graph::Edge>> {
+        Ok(Vec::new())
+    }
+    async fn get_node_history(
+        &self,
+        _node_id: &Uuid,
+    ) -> Result<Vec<Box<dyn graphiti_core::graph::Node>>> {
+        Ok(Vec::new())
+    }
+    async fn get_edge_history(&self, _edge_id: &Uuid) -> Result<Vec<graphiti_core::graph::Edge>> {
+        Ok(Vec::new())
+    }
 }
 
 #[cfg(all(test, feature = "backend-cozo", not(feature = "backend-sqlx")))]
@@ -922,7 +1354,12 @@ mod tests {
             target_id: Uuid::new_v4(),
             relationship: "RELATES_TO".to_string(),
             properties: serde_json::json!({"fact": "A relates to B"}),
-            temporal: TemporalMetadata { created_at: now, valid_from: now, valid_to: None, expired_at: None },
+            temporal: TemporalMetadata {
+                created_at: now,
+                valid_from: now,
+                valid_to: None,
+                expired_at: None,
+            },
             weight: 1.0,
         };
         driver.create_edge(&edge).await.unwrap();

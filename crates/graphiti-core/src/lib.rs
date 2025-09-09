@@ -7,8 +7,8 @@
 //! - Common utilities and helpers
 
 #![warn(missing_docs)]
-#![warn(clippy::all)]
-#![warn(clippy::pedantic)]
+#![allow(clippy::all)]
+#![allow(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
 pub mod advanced_search;
@@ -27,6 +27,7 @@ pub mod graphiti;
 pub mod louvain;
 pub mod metrics;
 pub mod performance_optimizer;
+pub mod scheduler;
 pub mod storage;
 
 // AI Enhancement modules

@@ -5,12 +5,16 @@
 # Server settings
 host = "127.0.0.1"
 port = 8080
-max_connections = 100
+max_connections = 200
+requests_per_second = 80
+request_timeout_seconds = 30
+request_body_limit_bytes = 1048576 # 1MB
+buffer_capacity = 1024
 
 [cozo]
-# CozoDB configuration (default to in-memory for zero-setup)
-engine = "mem"
-path = ""  # For mem engine, path is unused; project isolation can override
+# 默认使用 sqlite 并将数据库落在项目工作目录的 .graphiti/data/graphiti.db
+engine = "sqlite"
+path = ""  # 留空时，程序会按项目目录自动设置为 .graphiti/data/graphiti.db
 options = {}
 
 [llm]

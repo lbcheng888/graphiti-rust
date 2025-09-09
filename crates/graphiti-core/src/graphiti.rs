@@ -423,7 +423,7 @@ where
         info!("Getting neighbors for node: {}", node_id);
 
         // Create a traversal configuration
-        let _config = TraversalConfig {
+        let config = TraversalConfig {
             max_depth: depth,
             max_nodes: 1000,
             relationship_types: relationship_types.unwrap_or_default(),
@@ -431,15 +431,10 @@ where
             include_start: false,
         };
 
-        // TODO: Create GraphTraversal with shared storage
-        // For now, return empty result
-        info!("Graph traversal not yet fully implemented");
-        Ok(TraversalResult {
-            start_node: *node_id,
-            nodes: Vec::new(),
-            total_visited: 0,
-            max_depth_reached: 0,
-        })
+        // 使用 EpisodeProcessor 的存储实例创建遍历器执行 BFS
+        let storage = std::sync::Arc::clone(self.episode_processor.storage());
+        let traversal = crate::graph_traversal::GraphTraversal::new(storage);
+        traversal.bfs(*node_id, &config).await
     }
 
     /// Find shortest path between two nodes
@@ -453,7 +448,7 @@ where
         info!("Finding path from {} to {}", start_node, target_node);
 
         // Create a traversal configuration
-        let _config = TraversalConfig {
+        let config = TraversalConfig {
             max_depth,
             max_nodes: 10000,
             relationship_types: Vec::new(),
@@ -461,10 +456,12 @@ where
             include_start: true,
         };
 
-        // TODO: Create GraphTraversal with shared storage
-        // For now, return None
-        info!("Path finding not yet fully implemented");
-        Ok(None)
+        // 使用 EpisodeProcessor 的存储实例创建遍历器并执行最短路径查找
+        let storage = std::sync::Arc::clone(self.episode_processor.storage());
+        let traversal = crate::graph_traversal::GraphTraversal::new(storage);
+        traversal
+            .shortest_path(*start_node, *target_node, &config)
+            .await
     }
 
     /// Get graph state at a specific time

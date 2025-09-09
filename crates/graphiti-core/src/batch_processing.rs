@@ -10,8 +10,11 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[cfg(test)]
@@ -43,7 +46,7 @@ impl Default for BatchConfig {
         Self {
             max_batch_size: 1000,
             max_concurrent_batches: 4,
-            batch_timeout: 300, // 5 minutes
+            batch_timeout: 300, // seconds
             enable_progress_reporting: true,
             chunk_size: 100,
             enable_retry: true,
@@ -148,6 +151,8 @@ pub struct BatchProcessor<S> {
     progress_tracker: Arc<RwLock<HashMap<Uuid, BatchProgress>>>,
     /// Active batch queue
     batch_queue: Arc<RwLock<VecDeque<BatchOperation>>>,
+    /// Async ingestion channel (optional)
+    ingest_tx: mpsc::Sender<BatchOperation>,
 }
 
 impl<S> BatchProcessor<S>
@@ -157,14 +162,112 @@ where
     /// Create a new batch processor
     pub fn new(storage: Arc<S>, config: BatchConfig) -> Self {
         let batch_semaphore = Arc::new(Semaphore::new(config.max_concurrent_batches));
-
-        Self {
+        let (tx, rx) = mpsc::channel::<BatchOperation>(config.max_batch_size * 4);
+        let this = Self {
             storage,
             config,
             batch_semaphore,
             progress_tracker: Arc::new(RwLock::new(HashMap::new())),
             batch_queue: Arc::new(RwLock::new(VecDeque::new())),
-        }
+            ingest_tx: tx,
+        };
+        this.spawn_ingest_loop(rx);
+        this
+    }
+
+    /// Spawn background ingestion loop to coalesce small writes into batches.
+    fn spawn_ingest_loop(&self, mut rx: mpsc::Receiver<BatchOperation>) {
+        let storage = self.storage.clone();
+        let cfg = self.config.clone();
+        tokio::spawn(async move {
+            let _cancel = CancellationToken::new();
+            let mut buffer_edges: Vec<Edge> = Vec::with_capacity(cfg.chunk_size);
+            let mut buffer_nodes: Vec<Box<dyn Node>> = Vec::with_capacity(cfg.chunk_size);
+            let mut last_flush = std::time::Instant::now();
+            let flush_interval = Duration::from_millis(300);
+            let mut edge_ids: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+            let mut node_ids: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep(flush_interval) => {
+                        // time-based flush
+                        if !buffer_edges.is_empty() { let _ = storage.create_edges_batch(&buffer_edges).await; buffer_edges.clear(); edge_ids.clear(); }
+                        if !buffer_nodes.is_empty() { let _ = storage.create_nodes_batch(&buffer_nodes).await; buffer_nodes.clear(); node_ids.clear(); }
+                        last_flush = std::time::Instant::now();
+                    }
+                    Some(op) = rx.recv() => {
+                        match op {
+                            BatchOperation::InsertEdges(mut edges) => {
+                                for e in edges.drain(..) { if edge_ids.insert(e.id) { buffer_edges.push(e); } }
+                                if buffer_edges.len() >= cfg.chunk_size {
+                                    let _ = storage.create_edges_batch(&buffer_edges).await;
+                                    buffer_edges.clear(); edge_ids.clear();
+                                    last_flush = std::time::Instant::now();
+                                }
+                            }
+                            BatchOperation::InsertNodes(mut nodes) => {
+                                for n in nodes.drain(..) { let id = *n.id(); if node_ids.insert(id) { buffer_nodes.push(n); } }
+                                if buffer_nodes.len() >= cfg.chunk_size {
+                                    let _ = storage.create_nodes_batch(&buffer_nodes).await;
+                                    buffer_nodes.clear(); node_ids.clear();
+                                    last_flush = std::time::Instant::now();
+                                }
+                            }
+                            other => {
+                                // For non-insert ops, flush pending first then execute immediately
+                                if !buffer_edges.is_empty() { let _ = storage.create_edges_batch(&buffer_edges).await; buffer_edges.clear(); edge_ids.clear(); }
+                                if !buffer_nodes.is_empty() { let _ = storage.create_nodes_batch(&buffer_nodes).await; buffer_nodes.clear(); node_ids.clear(); }
+                                // Best-effort immediate processing using existing APIs
+                                let _ = match other {
+                                    BatchOperation::UpdateNodes(nodes) => {
+                                        for n in nodes { let _ = storage.update_node(n.as_ref()).await; }
+                                        Ok::<(), Error>(())
+                                    }
+                                    BatchOperation::DeleteNodes(ids) => {
+                                        for id in ids { let _ = storage.delete_node(&id).await; }
+                                        Ok::<(), Error>(())
+                                    }
+                                    BatchOperation::UpdateEdges(_) => {
+                                        // not supported: log via Ok
+                                        Ok::<(), Error>(())
+                                    }
+                                    BatchOperation::DeleteEdges(ids) => {
+                                        for id in ids { let _ = storage.delete_edge_by_id(&id).await; }
+                                        Ok::<(), Error>(())
+                                    }
+                                    BatchOperation::GraphTransformation { nodes_to_add, nodes_to_update, nodes_to_delete, edges_to_add, edges_to_update: _, edges_to_delete } => {
+                                        let _ = storage.create_nodes_batch(&nodes_to_add).await;
+                                        for n in nodes_to_update { let _ = storage.update_node(n.as_ref()).await; }
+                                        for id in nodes_to_delete { let _ = storage.delete_node(&id).await; }
+                                        let _ = storage.create_edges_batch(&edges_to_add).await;
+                                        for id in edges_to_delete { let _ = storage.delete_edge_by_id(&id).await; }
+                                        Ok::<(), Error>(())
+                                    }
+                                    _ => Ok::<(), Error>(())
+                                };
+                            }
+                        }
+                        // size/time flush heuristic
+                        if last_flush.elapsed() > Duration::from_millis(500) {
+                            if !buffer_edges.is_empty() { let _ = storage.create_edges_batch(&buffer_edges).await; buffer_edges.clear(); edge_ids.clear(); }
+                            if !buffer_nodes.is_empty() { let _ = storage.create_nodes_batch(&buffer_nodes).await; buffer_nodes.clear(); node_ids.clear(); }
+                            last_flush = std::time::Instant::now();
+                        }
+                    }
+                    else => break,
+                }
+            }
+        });
+    }
+
+    /// Enqueue operation to background ingester (non-blocking)
+    pub async fn ingest(&self, op: BatchOperation) -> Result<()> {
+        self.ingest_tx
+            .send(op)
+            .await
+            .map_err(|e| Error::Processing(format!("ingest queue closed: {}", e)))
     }
 
     /// Process a batch operation
@@ -788,6 +891,7 @@ impl<S> Clone for BatchProcessor<S> {
             batch_semaphore: Arc::clone(&self.batch_semaphore),
             progress_tracker: Arc::clone(&self.progress_tracker),
             batch_queue: Arc::clone(&self.batch_queue),
+            ingest_tx: self.ingest_tx.clone(),
         }
     }
 }

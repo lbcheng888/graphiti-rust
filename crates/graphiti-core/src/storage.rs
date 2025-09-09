@@ -25,6 +25,15 @@ pub trait GraphStorage: Send + Sync {
     /// Create a new node
     async fn create_node(&self, node: &dyn Node) -> Result<(), Self::Error>;
 
+    /// Create multiple nodes in a batch. Default implementation falls back to per-node writes.
+    /// Storage backends may override with a real batch operation.
+    async fn create_nodes_batch(&self, nodes: &[Box<dyn Node>]) -> Result<(), Self::Error> {
+        for node in nodes {
+            self.create_node(node.as_ref()).await?;
+        }
+        Ok(())
+    }
+
     /// Get a node by ID
     async fn get_node(&self, id: &Uuid) -> Result<Option<Box<dyn Node>>, Self::Error>;
 
@@ -78,6 +87,22 @@ pub trait GraphStorage: Send + Sync {
 
     /// Get all edges in the graph
     async fn get_all_edges(&self) -> Result<Vec<Edge>, Self::Error>;
+
+    /// Get recent edges filtered by relationship, ordered by created_at desc, limited to `limit`.
+    /// Default implementation falls back to `get_all_edges()` with in-memory filter/sort.
+    async fn get_recent_edges_by_rel(
+        &self,
+        relationship: &str,
+        limit: usize,
+    ) -> Result<Vec<Edge>, Self::Error> {
+        let mut edges = self.get_all_edges().await?;
+        edges.retain(|e| e.relationship == relationship);
+        edges.sort_by(|a, b| b.temporal.created_at.cmp(&a.temporal.created_at));
+        if edges.len() > limit {
+            edges.truncate(limit);
+        }
+        Ok(edges)
+    }
 
     /// Get nodes valid at a specific time
     async fn get_nodes_at_time(

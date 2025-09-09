@@ -60,7 +60,7 @@ impl fmt::Display for CodeEntityType {
             CodeEntityType::BestPractice => "BestPractice",
             CodeEntityType::CodeReview => "CodeReview",
         };
-        write!(f, "{}", str_repr)
+        write!(f, "{str_repr}")
     }
 }
 
@@ -194,7 +194,7 @@ impl fmt::Display for WorkflowStage {
             WorkflowStage::PerformanceOptimization => "PerformanceOptimization",
             WorkflowStage::Refactoring => "Refactoring",
         };
-        write!(f, "{}", str_repr)
+        write!(f, "{str_repr}")
     }
 }
 
@@ -258,6 +258,7 @@ pub struct KnowledgePattern {
 
 impl CodeEntity {
     /// Create a new code entity
+    #[must_use]
     pub fn new(entity_type: CodeEntityType, name: String, description: String) -> Self {
         let now = Utc::now();
         Self {
@@ -278,6 +279,7 @@ impl CodeEntity {
     }
 
     /// 设置文件位置信息
+    #[must_use]
     pub fn with_location(mut self, file_path: String, line_range: Option<(u32, u32)>) -> Self {
         self.file_path = Some(file_path);
         self.line_range = line_range;

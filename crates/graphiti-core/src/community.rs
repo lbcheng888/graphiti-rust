@@ -489,7 +489,7 @@ where
             let mut node_ids: Vec<Uuid> = nodes.iter().map(|n| *n.id()).collect();
             // Simple shuffle without external dependency
             for i in (1..node_ids.len()).rev() {
-                let j = (i as u64 * 1103515245 + 12345) as usize % (i + 1);
+                let j = (i as u64 * 1_103_515_245 + 12_345) as usize % (i + 1);
                 node_ids.swap(i, j);
             }
 
