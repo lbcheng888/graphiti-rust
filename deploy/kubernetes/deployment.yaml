@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: graphiti-mcp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: graphiti-mcp
+  template:
+    metadata:
+      labels:
+        app: graphiti-mcp
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+        - name: graphiti
+          image: graphiti-mcp:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/graphiti/config.toml", "--host", "0.0.0.0", "--port", "8080", "--project", "/var/lib/graphiti/data"]
+          ports:
+            - containerPort: 8080
+          env:
+            - name: RUST_LOG
+              value: info,graphiti=info
+            - name: GRAPHITI_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: graphiti-secrets
+                  key: GRAPHITI_AUTH_TOKEN
+          volumeMounts:
+            - name: config
+              mountPath: /etc/graphiti/config.toml
+              subPath: config.toml
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/graphiti/data
+            - name: search
+              mountPath: /var/lib/graphiti/search
+            - name: vectors
+              mountPath: /var/lib/graphiti/vectors
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: config
+          configMap:
+            name: graphiti-config
+        - name: data
+          emptyDir: {}
+        - name: search
+          emptyDir: {}
+        - name: vectors
+          emptyDir: {}
+

@@ -4,6 +4,7 @@ use graphiti_core::error::Result;
 use std::sync::Arc;
 
 use crate::EmbedderClient;
+use crate::{GemmaCandleClient, GemmaCandleConfig};
 use crate::EmbedderConfig;
 use crate::EmbeddingClient;
 use crate::LLMClient;
@@ -11,10 +12,7 @@ use crate::OllamaClient;
 use crate::OllamaConfig;
 use crate::OpenAIClient;
 use crate::OpenAIConfig;
-use crate::QwenCandleClient;
-use crate::QwenCandleConfig;
-use crate::QwenLocalClient;
-use crate::QwenLocalConfig;
+// Qwen-specific paths removed; use Generic embedder only
 
 /// Configuration for the service factory
 #[derive(Debug, Clone)]
@@ -37,19 +35,18 @@ pub enum LLMServiceConfig {
 /// Embedding service configuration
 #[derive(Debug, Clone)]
 pub enum EmbeddingServiceConfig {
-    /// Qwen local configuration
-    QwenLocal(QwenLocalConfig),
-    /// Qwen Candle configuration (pure Rust)
-    QwenCandle(QwenCandleConfig),
-    /// Generic embedder configuration
+    /// Generic embedder configuration (embed_anything + Candle)
     Generic(EmbedderConfig),
+    /// Native Candle Gemma (approximate via token embeddings)
+    GemmaCandle(GemmaCandleConfig),
 }
 
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
             llm: LLMServiceConfig::Ollama(OllamaConfig::default()),
-            embedding: EmbeddingServiceConfig::QwenCandle(QwenCandleConfig::default()),
+            // 默认与服务器一致，使用原生 Candle 近似（无需权重，仅 tokenizer.json）
+            embedding: EmbeddingServiceConfig::GemmaCandle(GemmaCandleConfig::default()),
         }
     }
 }
@@ -86,16 +83,12 @@ impl ServiceFactory {
         config: &EmbeddingServiceConfig,
     ) -> Result<Arc<dyn EmbeddingClient>> {
         match config {
-            EmbeddingServiceConfig::QwenLocal(qwen_config) => {
-                let client = QwenLocalClient::new(qwen_config.clone())?;
-                Ok(Arc::new(client))
-            }
-            EmbeddingServiceConfig::QwenCandle(qwen_config) => {
-                let client = QwenCandleClient::new(qwen_config.clone())?;
-                Ok(Arc::new(client))
-            }
             EmbeddingServiceConfig::Generic(embedder_config) => {
                 let client = EmbedderClient::new(embedder_config.clone())?;
+                Ok(Arc::new(client))
+            }
+            EmbeddingServiceConfig::GemmaCandle(cfg) => {
+                let client = GemmaCandleClient::new(cfg.clone())?;
                 Ok(Arc::new(client))
             }
         }
@@ -108,44 +101,17 @@ impl ServiceFactory {
                 model: "llama3.2:3b".to_string(), // Smaller model for local dev
                 ..Default::default()
             }),
-            embedding: EmbeddingServiceConfig::QwenLocal(QwenLocalConfig {
-                model_name: "Qwen/Qwen3-0.6B-Base".to_string(),
-                batch_size: 8, // Smaller batch for local
-                ..Default::default()
-            }),
+            embedding: EmbeddingServiceConfig::Generic(EmbedderConfig::default()),
         };
 
         Self::create_services(&config).await
     }
 
     /// Create services with OpenAI LLM and Qwen local embeddings
-    pub async fn create_hybrid_services(
-        openai_api_key: String,
-    ) -> Result<(Arc<dyn LLMClient>, Arc<dyn EmbeddingClient>)> {
-        let config = ServiceConfig {
-            llm: LLMServiceConfig::OpenAI(OpenAIConfig {
-                api_key: openai_api_key,
-                model: "gpt-4o-mini".to_string(), // Cost-effective model
-                ..Default::default()
-            }),
-            embedding: EmbeddingServiceConfig::QwenLocal(QwenLocalConfig::default()),
-        };
-
-        Self::create_services(&config).await
-    }
+    // Hybrid creator removed; use Generic embedder consistently
 
     /// Create services with custom Qwen configuration
-    pub async fn create_qwen_services(
-        llm_config: LLMServiceConfig,
-        qwen_config: QwenLocalConfig,
-    ) -> Result<(Arc<dyn LLMClient>, Arc<dyn EmbeddingClient>)> {
-        let config = ServiceConfig {
-            llm: llm_config,
-            embedding: EmbeddingServiceConfig::QwenLocal(qwen_config),
-        };
-
-        Self::create_services(&config).await
-    }
+    // Qwen-specific service creators removed
 
     /// Check if services are healthy and ready
     pub async fn health_check(

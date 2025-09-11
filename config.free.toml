@@ -4,6 +4,8 @@
 host = "0.0.0.0"
 port = 8091
 log_level = "info"
+require_auth = false
+allowed_origins = ["*"]
 
 [cozo]
 # Use in-memory for zero-setup; switch to rocksdb/sqlite for persistence
@@ -12,16 +14,18 @@ path = ""
 options = {}
 
 [llm]
-# LLM not required for core features; keep disabled to avoid downloads
 provider = "ollama"
 model = "disabled"
 
 [embedder]
-# Use Ollama embeddings to avoid heavy downloads
-provider = "ollama"
-model = "nomic-embed-text:latest"
+provider = "embed_anything"
+model = "google/embeddinggemma-300m"
 dimension = 768
-batch_size = 16
+batch_size = 32
+timeout = 120
+api_key = ""
+device = "auto"
+max_length = 8192
 
 [graphiti]
 name = "free"
@@ -30,6 +34,7 @@ min_entity_confidence = 0.6
 min_relationship_confidence = 0.5
 max_context_window = 4000
 generate_embeddings = true
+skip_entity_extraction = true
 
 [storage]
 search_index_path = "./data/search"

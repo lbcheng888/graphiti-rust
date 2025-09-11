@@ -4,6 +4,10 @@
 host = "0.0.0.0"
 port = 8080
 log_level = "info"
+# Enforce auth for write endpoints in production
+require_auth = true
+# Restrict CORS to known origins (adjust for your environment)
+allowed_origins = ["http://localhost:8080"]
 # tls = { cert_path = "/etc/graphiti/tls/server.crt", key_path = "/etc/graphiti/tls/server.key" }
 
 # CozoDB Configuration (embedded graph database)
@@ -64,13 +68,17 @@ rate_limit = 60
 # Note: Set API keys in environment variables for cloud providers
 
 [embedder]
-# Embedding provider: "openai", "voyage", "cohere", "local", "ollama", "qwencandle", "qwen3embedanything"
-provider = "qwencandle"
-model = "Qwen/Qwen3-Embedding-0.6B"
-dimension = 1536
+# 使用 embed_anything（Candle 后端）+ 本地缓存的 HF 模型以获得更高语义质量（完全本地、离线可用）
+provider = "embed_anything"
+model = "google/embeddinggemma-300m"
+dimension = 768
 batch_size = 16
 timeout = 120
 api_key = ""
+device = "auto"
+max_length = 8192
+# 不写死模型目录，推荐通过环境变量 EMBEDDING_MODEL_DIR 指向实际路径
+# cache_dir = "./models/embeddinggemma-300m"
 
 [embedder.openai]
 model = "text-embedding-3-small"
@@ -99,12 +107,12 @@ batch_size = 32
 timeout_secs = 60
 
 [embedder.ollama]
-# Ollama embedding models (free, local)
-base_url = "http://localhost:11434"
-model = "nomic-embed-text:latest"
-dimension = 768
-batch_size = 16
-timeout_secs = 60
+# 已不使用（保留段落避免破坏反序列化，可忽略）
+base_url = ""
+model = ""
+dimension = 0
+batch_size = 0
+timeout_secs = 0
 
 [graphiti]
 name = "default"

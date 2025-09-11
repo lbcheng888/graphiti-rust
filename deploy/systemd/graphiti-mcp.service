@@ -1,0 +1,24 @@
+[Unit]
+Description=Graphiti MCP Server
+After=network.target
+Wants=network-online.target
+
+[Service]
+User=graphiti
+Group=graphiti
+Environment=RUST_LOG=info,graphiti=info
+Environment=GRAPHITI_AUTH_TOKEN=change-me
+ExecStart=/usr/local/bin/graphiti-mcp-server --config /etc/graphiti/config.prod.toml --host 0.0.0.0 --port 8080 --project /var/lib/graphiti/data
+WorkingDirectory=/var/lib/graphiti/data
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=8192
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/graphiti
+
+[Install]
+WantedBy=multi-user.target
+

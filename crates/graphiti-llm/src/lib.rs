@@ -41,23 +41,16 @@ pub use embedder::EmbedderConfig;
 pub use embedder::EmbeddingClient;
 pub use embedder::EmbeddingProvider;
 
-mod qwen_local;
-pub use qwen_local::create_qwen_server_script;
-pub use qwen_local::QwenLocalClient;
-pub use qwen_local::QwenLocalConfig;
-
-mod qwen_candle;
-pub use qwen_candle::detect_device;
-pub use qwen_candle::QwenCandleClient;
-pub use qwen_candle::QwenCandleConfig;
-
-pub mod qwen3_embed_anything;
-pub use qwen3_embed_anything::create_qwen3_embed_anything_service;
-pub use qwen3_embed_anything::Qwen3EmbedAnythingClient;
-pub use qwen3_embed_anything::Qwen3EmbedAnythingConfig;
+// Qwen-related modules removed from public API; using embed_anything + Candle
+pub mod gemma_candle;
+pub use gemma_candle::{GemmaCandleClient, GemmaCandleConfig};
 
 // Re-export candle types for external use
 pub use candle_core;
+
+pub mod embed_anything_client;
+pub use embed_anything_client::EmbedAnythingClient;
+pub use embed_anything_client::EmbedAnythingConfig;
 
 mod service_factory;
 pub use service_factory::EmbeddingServiceConfig;

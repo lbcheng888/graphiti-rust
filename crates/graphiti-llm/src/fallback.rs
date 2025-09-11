@@ -41,18 +41,7 @@ impl Default for FallbackConfig {
                     ..Default::default()
                 },
             ],
-            embedding_providers: vec![
-                EmbedderConfig {
-                    provider: EmbeddingProvider::Local,
-                    ..Default::default()
-                },
-                EmbedderConfig {
-                    provider: EmbeddingProvider::Ollama,
-                    model: "nomic-embed-text:latest".to_string(),
-                    dimension: 768,
-                    ..Default::default()
-                },
-            ],
+            embedding_providers: vec![EmbedderConfig::default()],
             max_retries_per_provider: 2,
             fail_fast: false,
         }
@@ -400,24 +389,7 @@ impl FallbackEmbeddingClient {
             ));
         }
 
-        // Update API keys from environment
-        for embedding_config in &mut config.embedding_providers {
-            if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-                if matches!(embedding_config.provider, EmbeddingProvider::OpenAI) {
-                    embedding_config.api_key = key;
-                }
-            }
-            if let Ok(key) = std::env::var("VOYAGE_API_KEY") {
-                if matches!(embedding_config.provider, EmbeddingProvider::Voyage) {
-                    embedding_config.api_key = key;
-                }
-            }
-            if let Ok(key) = std::env::var("COHERE_API_KEY") {
-                if matches!(embedding_config.provider, EmbeddingProvider::Cohere) {
-                    embedding_config.api_key = key;
-                }
-            }
-        }
+        // No API keys needed for embed_anything
 
         let mut clients = Vec::new();
         let mut successful_providers = Vec::new();

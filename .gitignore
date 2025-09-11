@@ -45,3 +45,5 @@ lcov.info
 test*
 .graphiti
 docs/
+.venv
+server.pid

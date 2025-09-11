@@ -11,6 +11,7 @@ use axum::body::Body;
 use axum::extract::Query;
 use axum::extract::State;
 use axum::http::HeaderMap;
+use axum::http::HeaderValue;
 use axum::http::Request as HttpRequest;
 use axum::http::StatusCode;
 use axum::middleware;
@@ -36,9 +37,6 @@ use graphiti_core::prelude::*;
 use graphiti_cozo::CozoConfig as CoreCozoConfig;
 use graphiti_cozo::CozoDriver;
 use graphiti_llm::create_llm_client;
-use graphiti_llm::detect_device;
-use graphiti_llm::qwen3_embed_anything::Qwen3EmbedAnythingClient;
-use graphiti_llm::qwen3_embed_anything::Qwen3EmbedAnythingConfig;
 use graphiti_llm::EmbedderClient;
 use graphiti_llm::EmbedderConfig;
 use graphiti_llm::EmbeddingClient;
@@ -55,8 +53,6 @@ use governor::RateLimiter;
 use graphiti_llm::LLMConfig;
 use graphiti_llm::LLMProvider;
 use graphiti_llm::MultiLLMClient;
-use graphiti_llm::QwenCandleClient;
-use graphiti_llm::QwenCandleConfig;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use metrics_exporter_prometheus::PrometheusHandle;
 // use nonzero_ext::nonzero; // no longer used
@@ -78,6 +74,7 @@ use tower_http::trace::TraceLayer;
 use tower::limit::GlobalConcurrencyLimitLayer;
 use tracing::error;
 use tracing::info;
+use tracing::debug;
 use tracing::warn;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -85,7 +82,9 @@ use uuid::Uuid;
 // NonZeroU32 is not used; remove import to silence warning
 use std::sync::Arc as StdArc;
 use std::num::NonZeroU32;
+use std::sync::atomic::{AtomicBool, Ordering};
 // metrics middleware removed for compatibility; keep exporter via init_metrics
+use metrics::{counter, histogram};
 
 type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
@@ -128,6 +127,10 @@ struct Args {
     #[arg(long, default_value = "false")]
     stdio: bool,
 
+    /// Per-request timeout in seconds for stdio mode
+    #[arg(long = "stdio-timeout", env = "GRAPHITI_STDIO_TIMEOUT_SECS")]
+    stdio_timeout: Option<u64>,
+
     /// Project directory (for project-specific isolation, similar to Serena's --project)
     #[arg(long, env = "GRAPHITI_PROJECT")]
     project: Option<PathBuf>,
@@ -164,6 +167,12 @@ struct ServerSettings {
     /// Buffer capacity for pending requests before load shedding
     #[serde(default = "default_buffer_capacity")]
     pub buffer_capacity: usize,
+    /// Require Authorization header for protected endpoints
+    #[serde(default = "default_require_auth")]
+    pub require_auth: bool,
+    /// Allowed CORS origins (use ["*"] for any)
+    #[serde(default)]
+    pub allowed_origins: Option<Vec<String>>,
 }
 
 impl Default for ServerSettings {
@@ -177,6 +186,8 @@ impl Default for ServerSettings {
             request_timeout_seconds: default_request_timeout_seconds(),
             request_body_limit_bytes: default_request_body_limit_bytes(),
             buffer_capacity: default_buffer_capacity(),
+            require_auth: default_require_auth(),
+            allowed_origins: None,
         }
     }
 }
@@ -187,6 +198,7 @@ const fn default_requests_per_second() -> u32 { 50 }
 const fn default_request_timeout_seconds() -> u64 { 30 }
 const fn default_request_body_limit_bytes() -> usize { 1 * 1024 * 1024 }
 const fn default_buffer_capacity() -> usize { 1024 }
+const fn default_require_auth() -> bool { true }
 
 /// TLS settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,6 +331,7 @@ pub struct AppState {
     project_scanner: Arc<ProjectScanner>,
     rate_limiter: StdArc<Limiter>,
     auth_token: Option<String>,
+    require_auth: bool,
 }
 
 /// Trait for Graphiti service operations
@@ -661,6 +674,21 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize services
     info!("Initializing Graphiti services...");
+    // Emit startup diagnostics for embedding provider to aid debugging
+    match config.embedder.provider {
+        graphiti_llm::EmbeddingProvider::EmbedAnything => {
+            info!("Embedding provider: embed_anything (HF model) — model={}, dim={}", config.embedder.model, config.embedder.dimension);
+        }
+        graphiti_llm::EmbeddingProvider::GemmaCandleApprox => {
+            info!("Embedding provider: gemma_candle (native approximate) — tokenizer-only, dim={}", config.embedder.dimension);
+            if std::env::var("EMBEDDING_MODEL_DIR").is_err() && config.embedder.cache_dir.is_none() {
+                warn!("EMBEDDING_MODEL_DIR not set and cache_dir not provided; ensure tokenizer.json is accessible");
+            }
+        }
+        _ => {
+            info!("Embedding provider: other ({:?})", config.embedder.provider);
+        }
+    }
     let (
         graphiti_service,
         learning_detector,
@@ -680,33 +708,50 @@ async fn main() -> anyhow::Result<()> {
             NonZeroU32::new(config.server.requests_per_second).unwrap_or(NonZeroU32::new(1).unwrap()),
         ))),
         auth_token: std::env::var("GRAPHITI_AUTH_TOKEN").ok(),
+        require_auth: config.server.require_auth,
     };
 
-    // Perform initial project scan if in current directory
-    if let Ok(current_dir) = std::env::current_dir() {
-        if project_scanner.needs_scan(&current_dir).await {
-            info!("Performing initial project scan...");
-            tokio::spawn({
-                let scanner = project_scanner.clone();
-                let _service = graphiti_service.clone();
-                async move {
-                    match scanner.scan_project(&current_dir).await {
-                        Ok(result) => {
-                            info!(
-                                "Initial project scan completed: {} files, {} entities, {} memories",
-                                result.files_scanned, result.entities_added, result.memories_added
-                            );
-                            scanner.mark_scanned(&current_dir).await;
-                        }
-                        Err(e) => {
-                            warn!("Initial project scan failed: {}", e);
+    // If authentication is required but no token provided, abort startup
+    // In stdio mode, skip HTTP auth requirement checks
+    if !args.stdio && state.require_auth && state.auth_token.is_none() {
+        anyhow::bail!(
+            "GRAPHITI_AUTH_TOKEN is required but not set (server.require_auth=true)."
+        );
+    }
+
+    // Perform initial project scan only when explicitly enabled to avoid blocking stdio startup
+    let enable_initial_scan = std::env::var("GRAPHITI_ENABLE_INITIAL_SCAN")
+        .ok()
+        .as_deref()
+        == Some("1");
+    if enable_initial_scan {
+        if let Ok(current_dir) = std::env::current_dir() {
+            if project_scanner.needs_scan(&current_dir).await {
+                info!("Performing initial project scan...");
+                tokio::spawn({
+                    let scanner = project_scanner.clone();
+                    let _service = graphiti_service.clone();
+                    async move {
+                        match scanner.scan_project(&current_dir).await {
+                            Ok(result) => {
+                                info!(
+                                    "Initial project scan completed: {} files, {} entities, {} memories",
+                                    result.files_scanned, result.entities_added, result.memories_added
+                                );
+                                scanner.mark_scanned(&current_dir).await;
+                            }
+                            Err(e) => {
+                                warn!("Initial project scan failed: {}", e);
+                            }
                         }
                     }
-                }
-            });
-        } else {
-            info!("Project already scanned, skipping initial scan");
+                });
+            } else {
+                info!("Project already scanned, skipping initial scan");
+            }
         }
+    } else {
+        info!("Initial project scan disabled (set GRAPHITI_ENABLE_INITIAL_SCAN=1 to enable)");
     }
 
     // Build router
@@ -727,7 +772,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/memory/:id/related", get(get_related))
         .route("/metrics", get(metrics))
         .layer(TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::default()))
-        .layer(build_cors_layer())
+        .layer(build_cors_layer(&config.server))
         // Core hardening stack
         .layer(GlobalConcurrencyLimitLayer::new(
             config.server.max_connections,
@@ -744,63 +789,233 @@ async fn main() -> anyhow::Result<()> {
         ))
         .with_state(state.clone());
 
+    // Initialize Prometheus exporter even in stdio mode (no /metrics endpoint there, but metrics are recorded)
+    let _ = init_metrics();
+
     // Check if running in stdio mode
     if args.stdio {
         info!("Starting MCP server in stdio mode");
 
-        // Run stdio MCP server
+        // Run stdio MCP server; support both LSP-style (Content-Length) and NDJSON framing
         use tokio::io::stdin;
         use tokio::io::stdout;
         use tokio::io::AsyncBufReadExt;
+        use tokio::io::AsyncReadExt;
         use tokio::io::AsyncWriteExt;
         use tokio::io::BufReader;
 
         let stdin = stdin();
         let mut stdout = stdout();
         let mut reader = BufReader::new(stdin);
-        let mut line = String::new();
+        use tokio::sync::Semaphore;
+
+        // None => auto-detect; Some(true) => NDJSON; Some(false) => LSP (Content-Length)
+        let mut use_ndjson: Option<bool> = match std::env::var("GRAPHITI_STDIN_FRAMING").ok().as_deref() {
+            Some("ndjson") | Some("NDJSON") => Some(true),
+            Some("lsp") | Some("LSP") => Some(false),
+            _ => None,
+        };
+
+        // Concurrency guard for stdio processing
+        let stdio_sema = Arc::new(Semaphore::new(config.server.max_connections));
+        let stdio_timeout_secs = args
+            .stdio_timeout
+            .unwrap_or(config.server.request_timeout_seconds);
 
         loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) => break, // EOF
-                Ok(_) => {
-                    // Process MCP request using existing handler with timeout
-                    if let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) {
-                        let timeout = Duration::from_secs(config.server.request_timeout_seconds);
-                        match tokio::time::timeout(timeout, mcp_handler(State(state.clone()), Json(request))).await {
-                            Ok(Ok(Json(response))) => {
-                                let response_json = serde_json::to_string(&response)?;
-                                stdout.write_all(response_json.as_bytes()).await?;
-                                stdout.write_all(b"\n").await?;
-                                stdout.flush().await?;
-                            }
-                            Ok(Err(e)) => {
-                                let error_response = serde_json::json!({
-                                    "jsonrpc": "2.0",
-                                    "error": {"code": -1, "message": format!("Error: {:?}", e)}
-                                });
-                                let response_json = serde_json::to_string(&error_response)?;
-                                stdout.write_all(response_json.as_bytes()).await?;
-                                stdout.write_all(b"\n").await?;
-                                stdout.flush().await?;
-                            }
-                            Err(_elapsed) => {
-                                let error_response = serde_json::json!({
-                                    "jsonrpc": "2.0",
-                                    "error": {"code": -1, "message": "Request timed out"}
-                                });
-                                let response_json = serde_json::to_string(&error_response)?;
-                                stdout.write_all(response_json.as_bytes()).await?;
-                                stdout.write_all(b"\n").await?;
-                                stdout.flush().await?;
+            // Obtain one request either via NDJSON line or LSP headers+body
+            let mut request_value: Option<serde_json::Value> = None;
+            let mut original_request_id_present: bool = false;
+            let mut original_method: Option<String> = None;
+
+            // If already in NDJSON mode, read a single line and parse
+            if matches!(use_ndjson, Some(true)) {
+                let mut line = String::new();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => return Ok(()), // EOF
+                    Ok(_) => {
+                        let trimmed = line.trim();
+                        if trimmed.is_empty() { continue; }
+                        match serde_json::from_str::<serde_json::Value>(trimmed) {
+                            Ok(v) => request_value = Some(v),
+                            Err(e) => {
+                                eprintln!("Parse error (NDJSON): {}", e);
+                                continue;
                             }
                         }
                     }
+                    Err(e) => {
+                        eprintln!("Error reading NDJSON line from stdin: {}", e);
+                        return Ok(());
+                    }
                 }
-                Err(e) => {
-                    eprintln!("Error reading from stdin: {}", e);
-                    break;
+            } else {
+                // Read headers until blank line; if the very first line looks like JSON, switch to NDJSON
+                let mut headers_raw = String::new();
+                let mut first_line_checked = false;
+                let mut ndjson_line: Option<String> = None;
+
+                // 1) Read headers or detect NDJSON
+                loop {
+                    let mut line = String::new();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) => {
+                            // EOF
+                            return Ok(());
+                        }
+                        Ok(_) => {
+                            if !first_line_checked {
+                                first_line_checked = true;
+                                let ls = line.trim_start();
+                                if ls.starts_with('{') {
+                                    // NDJSON detected
+                                    use_ndjson = Some(true);
+                                    ndjson_line = Some(line);
+                                    break;
+                                }
+                            }
+                            // Header section ends with a blank line
+                            if line == "\r\n" || line == "\n" {
+                                break;
+                            }
+                            headers_raw.push_str(&line);
+                        }
+                        Err(e) => {
+                            eprintln!("Error reading headers from stdin: {}", e);
+                            return Ok(());
+                        }
+                    }
+                }
+
+                if ndjson_line.is_some() {
+                    // Parse the NDJSON line we just captured
+                    let line = ndjson_line.take().unwrap();
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() { continue; }
+                    match serde_json::from_str::<serde_json::Value>(trimmed) {
+                        Ok(v) => request_value = Some(v),
+                        Err(e) => {
+                            eprintln!("Parse error (NDJSON first line): {}", e);
+                            continue;
+                        }
+                    }
+                } else {
+                    if headers_raw.is_empty() {
+                        // Spurious blank line; continue waiting for next message
+                        continue;
+                    }
+
+                    // 2) Parse Content-Length header (case-insensitive)
+                    let mut content_length: Option<usize> = None;
+                    for line in headers_raw.lines() {
+                        let lower = line.to_ascii_lowercase();
+                        if let Some(rest) = lower.strip_prefix("content-length:") {
+                            let len_str = rest.trim();
+                            if let Ok(len) = len_str.parse::<usize>() {
+                                content_length = Some(len);
+                                break;
+                            }
+                        }
+                    }
+
+                    let len = match content_length {
+                        Some(v) => v,
+                        None => {
+                            eprintln!("Missing Content-Length header; skipping message");
+                            continue;
+                        }
+                    };
+
+                    // 3) Read exact body bytes
+                    let mut body = vec![0u8; len];
+                    if let Err(e) = reader.read_exact(&mut body).await {
+                        eprintln!("Error reading request body: {}", e);
+                        return Ok(());
+                    }
+
+                    // 4) Parse JSON-RPC request
+                    match serde_json::from_slice::<serde_json::Value>(&body) {
+                        Ok(v) => {
+                            request_value = Some(v);
+                            // Mark we are in LSP framing mode
+                            if use_ndjson.is_none() { use_ndjson = Some(false); }
+                        }
+                        Err(e) => {
+                            eprintln!("Parse error (LSP body): {}", e);
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // 5) Dispatch request with timeout
+            let response_value = if let Some(request) = request_value {
+                original_request_id_present = request.get("id").is_some() && !request.get("id").unwrap().is_null();
+                original_method = request.get("method").and_then(|m| m.as_str()).map(|s| s.to_string());
+
+                // Metrics: request count
+                if let Some(ref m) = original_method {
+                    counter!("mcp_requests_total", "method" => m.clone()).increment(1);
+                } else {
+                    counter!("mcp_requests_total", "method" => "unknown").increment(1);
+                }
+
+                // Concurrency
+                let _permit = stdio_sema.acquire().await.expect("semaphore poisoned");
+
+                let start = std::time::Instant::now();
+                let timeout = Duration::from_secs(stdio_timeout_secs);
+                let result = tokio::time::timeout(
+                    timeout,
+                    mcp_handler(State(state.clone()), Json(request)),
+                )
+                .await;
+
+                let elapsed = start.elapsed().as_secs_f64();
+                if let Some(ref m) = original_method {
+                    histogram!("mcp_request_duration_seconds", "method" => m.clone()).record(elapsed);
+                } else {
+                    histogram!("mcp_request_duration_seconds", "method" => "unknown").record(elapsed);
+                }
+
+                match result {
+                    Ok(Ok(Json(response))) => response,
+                    Ok(Err(e)) => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "error": {"code": -32000, "message": format!("Error: {:?}", e)}
+                    }),
+                    Err(_elapsed) => serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "error": {"code": -32001, "message": "Request timed out"}
+                    }),
+                }
+            } else {
+                continue;
+            };
+
+            // 6) Write response matching the detected framing
+            // Skip responding for notifications (no id) or explicit "initialized" notification
+            let is_notification = !original_request_id_present
+                || matches!(original_method.as_deref(), Some("initialized"));
+            if !is_notification {
+                let response_json = serde_json::to_string(&response_value)?;
+                match use_ndjson {
+                    Some(true) => {
+                        // NDJSON style
+                        stdout.write_all(response_json.as_bytes()).await?;
+                        stdout.write_all(b"\n").await?;
+                        stdout.flush().await?;
+                    }
+                    _ => {
+                        // Default to LSP-style with Content-Length header
+                        let header = format!(
+                            "Content-Length: {}\r\nContent-Type: application/json; charset=utf-8\r\n\r\n",
+                            response_json.as_bytes().len()
+                        );
+                        stdout.write_all(header.as_bytes()).await?;
+                        stdout.write_all(response_json.as_bytes()).await?;
+                        stdout.flush().await?;
+                    }
                 }
             }
         }
@@ -886,16 +1101,47 @@ fn load_config(args: &Args) -> anyhow::Result<ServerConfig> {
     // Apply project-specific overrides
     apply_project_overrides(&mut config, args)?;
 
+    // Note: keep engine semantics as configured; do not override path here to respect per-project DB
+
     info!("Loaded configuration from: {}", config_path.display());
     info!("Using LLM provider: {}", config.llm.provider);
     info!("Using embedding provider: {:?}", config.embedder.provider);
     info!("Database path: {}", config.cozo.path);
+    debug!(
+        "Server settings: max_connections={} rps={} req_timeout_s={} body_limit_bytes={}",
+        config.server.max_connections,
+        config.server.requests_per_second,
+        config.server.request_timeout_seconds,
+        config.server.request_body_limit_bytes
+    );
 
     Ok(config)
 }
 
 /// Resolve configuration file path with project isolation
 fn resolve_config_path(args: &Args) -> anyhow::Result<PathBuf> {
+    // 1) 显式 --config 优先：当传入的路径不是默认的 "config.toml" 时，优先直接使用
+    //    这样可确保诸如 config.free.toml 等轻量配置在 Codex/IDE 中能够生效，避免被 .graphiti 覆盖。
+    let explicit_force = std::env::var("GRAPHITI_CONFIG_FORCE").ok().as_deref() == Some("1");
+    let is_explicit_config = args.config.file_name().map(|n| n != "config.toml").unwrap_or(true);
+    if explicit_force || is_explicit_config {
+        if args.config.exists() {
+            info!(
+                "Using explicit --config: {}{}",
+                args.config.display(),
+                if explicit_force { " (forced)" } else { "" }
+            );
+            return Ok(args.config.clone());
+        } else if explicit_force {
+            return Err(anyhow::anyhow!(
+                "GRAPHITI_CONFIG_FORCE=1 but --config does not exist: {}",
+                args.config.display()
+            ));
+        }
+        // 若非强制且文件不存在，继续按项目配置流程处理
+    }
+
+    // 2) 项目隔离配置：如果在项目目录下存在 .graphiti/config.toml，则使用之
     // Determine the project directory (similar to Serena's --project)
     let project_dir = if let Some(project) = &args.project {
         project.clone()
@@ -914,7 +1160,7 @@ fn resolve_config_path(args: &Args) -> anyhow::Result<PathBuf> {
         return Ok(project_config);
     }
 
-    // Create project-specific config directory if it doesn't exist
+    // 3) 若项目配置不存在，则尝试创建并回落
     let graphiti_dir = project_dir.join(".graphiti");
     if !graphiti_dir.exists() {
         std::fs::create_dir_all(&graphiti_dir)
@@ -956,10 +1202,28 @@ fn resolve_config_path(args: &Args) -> anyhow::Result<PathBuf> {
 
 /// Apply project-specific configuration overrides
 fn apply_project_overrides(config: &mut ServerConfig, args: &Args) -> anyhow::Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write as _;
+
     // Override database path if specified
     if let Some(db_path) = &args.db_path {
         config.cozo.path = db_path.to_string_lossy().to_string();
         info!("Database path overridden to: {}", config.cozo.path);
+
+        // Ensure parent directory exists and DB file is present (sqlx/sqlite requires file on some systems)
+        let db_path_buf = db_path.clone();
+        if let Some(parent) = db_path_buf.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("Failed to create data directory: {}", e))?;
+        }
+        if !db_path_buf.exists() {
+            // Create an empty file so sqlite can open it reliably
+            let _ = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(&db_path_buf)
+                .map_err(|e| anyhow::anyhow!("Failed to create DB file {}: {}", db_path_buf.display(), e))?;
+        }
     } else {
         // Determine the project directory (similar to Serena's --project)
         let project_dir = if let Some(project) = &args.project {
@@ -980,6 +1244,14 @@ fn apply_project_overrides(config: &mut ServerConfig, args: &Args) -> anyhow::Re
         if let Some(parent) = project_db.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| anyhow::anyhow!("Failed to create data directory: {}", e))?;
+        }
+        // Ensure DB file exists (avoid sqlite 'unable to open database file')
+        if !project_db.exists() {
+            let _ = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(&project_db)
+                .map_err(|e| anyhow::anyhow!("Failed to create DB file {}: {}", project_db.display(), e))?;
         }
 
         config.cozo.path = project_db.to_string_lossy().to_string();
@@ -1133,7 +1405,7 @@ pub async fn mcp_handler(
     State(state): State<AppState>,
     Json(request): Json<serde_json::Value>,
 ) -> std::result::Result<Json<serde_json::Value>, StatusCode> {
-    info!("MCP request: {}", request);
+    debug!("MCP request: {}", request);
 
     // Basic MCP protocol implementation
     if let Some(method) = request.get("method").and_then(|m| m.as_str()) {
@@ -1180,6 +1452,17 @@ pub async fn mcp_handler(
                     "id": request.get("id"),
                     "result": {
                         "tools": [
+                            {
+                                "name": "ping",
+                                "description": "Lightweight health check; returns pong and basic status",
+                                "inputSchema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "echo": {"type": "string", "description": "Optional text to echo back"}
+                                    },
+                                    "required": []
+                                }
+                            },
                             {
                                 "name": "add_memory",
                                 "description": "Add a new memory to the knowledge graph",
@@ -1447,6 +1730,30 @@ pub async fn mcp_handler(
                 if let Some(params) = request.get("params") {
                     if let Some(tool_name) = params.get("name").and_then(|n| n.as_str()) {
                         match tool_name {
+                            "ping" => {
+                                let echo = params
+                                    .get("arguments")
+                                    .and_then(|a| a.get("echo"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let now = chrono::Utc::now().to_rfc3339();
+                                let response = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": request.get("id"),
+                                    "result": {
+                                        "content": [{
+                                            "type": "json",
+                                            "json": {
+                                                "status": "ok",
+                                                "pong": true,
+                                                "echo": echo,
+                                                "time": now
+                                            }
+                                        }]
+                                    }
+                                });
+                                Ok(Json(response))
+                            }
                             "search_memory_facts" => {
                                 // Minimal facts search using extracted relationships
                                 if let Some(args) = params.get("arguments") {
@@ -1613,43 +1920,61 @@ pub async fn mcp_handler(
                             }
                             "search_memory" => {
                                 if let Some(args) = params.get("arguments") {
-                                    let req: SearchMemoryRequest =
-                                        match serde_json::from_value(args.clone()) {
-                                            Ok(req) => req,
-                                            Err(_) => return Err(StatusCode::BAD_REQUEST),
-                                        };
+                                    let req: SearchMemoryRequest = match serde_json::from_value(args.clone()) {
+                                        Ok(req) => req,
+                                        Err(e) => {
+                                            error!("Failed to parse search_memory request: {}", e);
+                                            let response = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": request.get("id"),
+                                                "error": {"code": -32602, "message": "Invalid params"}
+                                            });
+                                            return Ok(Json(response));
+                                        }
+                                    };
 
                                     match state.graphiti.search_memory(req).await {
                                         Ok(result) => {
                                             let response = serde_json::json!({
                                                 "jsonrpc": "2.0",
                                                 "id": request.get("id"),
-                                                "result": {
-                                                    "content": [{
-                                                        "type": "json",
-                                                        "json": result
-                                                    }]
-                                                }
+                                                "result": {"content": [{"type": "json", "json": result}]}
                                             });
                                             Ok(Json(response))
                                         }
                                         Err(e) => {
                                             error!("Failed to search memory: {}", e);
-                                            Err(StatusCode::INTERNAL_SERVER_ERROR)
+                                            let response = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": request.get("id"),
+                                                "error": {"code": -32000, "message": "Internal error"}
+                                            });
+                                            Ok(Json(response))
                                         }
                                     }
                                 } else {
-                                    Err(StatusCode::BAD_REQUEST)
+                                    let response = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": request.get("id"),
+                                        "error": {"code": -32602, "message": "Missing arguments"}
+                                    });
+                                    Ok(Json(response))
                                 }
                             }
                             "delete_episode" => {
                                 if let Some(args) = params.get("arguments") {
-                                    let id_str = args
-                                        .get("uuid")
-                                        .and_then(|v| v.as_str())
-                                        .ok_or(StatusCode::BAD_REQUEST)?;
-                                    let id = uuid::Uuid::parse_str(id_str)
-                                        .map_err(|_| StatusCode::BAD_REQUEST)?;
+                                    let id_opt = args.get("uuid").and_then(|v| v.as_str());
+                                    let id = match id_opt.and_then(|s| uuid::Uuid::parse_str(s).ok()) {
+                                        Some(v) => v,
+                                        None => {
+                                            let response = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": request.get("id"),
+                                                "error": {"code": -32602, "message": "Invalid params: uuid"}
+                                            });
+                                            return Ok(Json(response));
+                                        }
+                                    };
                                     match state.graphiti.delete_episode(id).await {
                                         Ok(_) => {
                                             let response = serde_json::json!({
@@ -1661,11 +1986,21 @@ pub async fn mcp_handler(
                                         }
                                         Err(e) => {
                                             error!("Failed to delete episode: {}", e);
-                                            Err(StatusCode::INTERNAL_SERVER_ERROR)
+                                            let response = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": request.get("id"),
+                                                "error": {"code": -32000, "message": "Internal error"}
+                                            });
+                                            Ok(Json(response))
                                         }
                                     }
                                 } else {
-                                    Err(StatusCode::BAD_REQUEST)
+                                    let response = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": request.get("id"),
+                                        "error": {"code": -32602, "message": "Missing arguments"}
+                                    });
+                                    Ok(Json(response))
                                 }
                             }
                             "get_episodes" => {
@@ -1766,11 +2101,21 @@ pub async fn mcp_handler(
                                         }
                                         Err(e) => {
                                             error!("Failed to delete entity edge: {}", e);
-                                            Err(StatusCode::INTERNAL_SERVER_ERROR)
+                                            let response = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": request.get("id"),
+                                                "error": {"code": -32000, "message": "Internal error"}
+                                            });
+                                            Ok(Json(response))
                                         }
                                     }
                                 } else {
-                                    Err(StatusCode::BAD_REQUEST)
+                                    let response = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": request.get("id"),
+                                        "error": {"code": -32602, "message": "Missing arguments"}
+                                    });
+                                    Ok(Json(response))
                                 }
                             }
                             "add_code_entity" => {
@@ -1779,11 +2124,13 @@ pub async fn mcp_handler(
                                         match serde_json::from_value(args.clone()) {
                                             Ok(req) => req,
                                             Err(e) => {
-                                                error!(
-                                                    "Failed to parse add_code_entity request: {}",
-                                                    e
-                                                );
-                                                return Err(StatusCode::BAD_REQUEST);
+                                                error!("Failed to parse add_code_entity request: {}", e);
+                                                let response = serde_json::json!({
+                                                    "jsonrpc": "2.0",
+                                                    "id": request.get("id"),
+                                                    "error": {"code": -32602, "message": "Invalid params"}
+                                                });
+                                                return Ok(Json(response));
                                             }
                                         };
 
@@ -1803,11 +2150,21 @@ pub async fn mcp_handler(
                                         }
                                         Err(e) => {
                                             error!("Failed to add code entity: {}", e);
-                                            Err(StatusCode::INTERNAL_SERVER_ERROR)
+                                            let response = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": request.get("id"),
+                                                "error": {"code": -32000, "message": "Internal error"}
+                                            });
+                                            Ok(Json(response))
                                         }
                                     }
                                 } else {
-                                    Err(StatusCode::BAD_REQUEST)
+                                    let response = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": request.get("id"),
+                                        "error": {"code": -32602, "message": "Missing arguments"}
+                                    });
+                                    Ok(Json(response))
                                 }
                             }
                             "record_activity" => {
@@ -1816,11 +2173,13 @@ pub async fn mcp_handler(
                                         match serde_json::from_value(args.clone()) {
                                             Ok(req) => req,
                                             Err(e) => {
-                                                error!(
-                                                    "Failed to parse record_activity request: {}",
-                                                    e
-                                                );
-                                                return Err(StatusCode::BAD_REQUEST);
+                                                error!("Failed to parse record_activity request: {}", e);
+                                                let response = serde_json::json!({
+                                                    "jsonrpc": "2.0",
+                                                    "id": request.get("id"),
+                                                    "error": {"code": -32602, "message": "Invalid params"}
+                                                });
+                                                return Ok(Json(response));
                                             }
                                         };
 
@@ -1840,11 +2199,21 @@ pub async fn mcp_handler(
                                         }
                                         Err(e) => {
                                             error!("Failed to record activity: {}", e);
-                                            Err(StatusCode::INTERNAL_SERVER_ERROR)
+                                            let response = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": request.get("id"),
+                                                "error": {"code": -32000, "message": "Internal error"}
+                                            });
+                                            Ok(Json(response))
                                         }
                                     }
                                 } else {
-                                    Err(StatusCode::BAD_REQUEST)
+                                    let response = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": request.get("id"),
+                                        "error": {"code": -32602, "message": "Missing arguments"}
+                                    });
+                                    Ok(Json(response))
                                 }
                             }
                             "search_code" => {
@@ -1853,11 +2222,13 @@ pub async fn mcp_handler(
                                         match serde_json::from_value(args.clone()) {
                                             Ok(req) => req,
                                             Err(e) => {
-                                                error!(
-                                                    "Failed to parse search_code request: {}",
-                                                    e
-                                                );
-                                                return Err(StatusCode::BAD_REQUEST);
+                                                error!("Failed to parse search_code request: {}", e);
+                                                let response = serde_json::json!({
+                                                    "jsonrpc": "2.0",
+                                                    "id": request.get("id"),
+                                                    "error": {"code": -32602, "message": "Invalid params"}
+                                                });
+                                                return Ok(Json(response));
                                             }
                                         };
 
@@ -1877,11 +2248,21 @@ pub async fn mcp_handler(
                                         }
                                         Err(e) => {
                                             error!("Failed to search code: {}", e);
-                                            Err(StatusCode::INTERNAL_SERVER_ERROR)
+                                            let response = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": request.get("id"),
+                                                "error": {"code": -32000, "message": "Internal error"}
+                                            });
+                                            Ok(Json(response))
                                         }
                                     }
                                 } else {
-                                    Err(StatusCode::BAD_REQUEST)
+                                    let response = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": request.get("id"),
+                                        "error": {"code": -32602, "message": "Missing arguments"}
+                                    });
+                                    Ok(Json(response))
                                 }
                             }
                             "batch_add_code_entities" => {
@@ -1890,11 +2271,13 @@ pub async fn mcp_handler(
                                         match serde_json::from_value(args.clone()) {
                                             Ok(req) => req,
                                             Err(e) => {
-                                                error!(
-                                                    "Failed to parse batch_add_code_entities request: {}",
-                                                    e
-                                                );
-                                                return Err(StatusCode::BAD_REQUEST);
+                                                error!("Failed to parse batch_add_code_entities request: {}", e);
+                                                let response = serde_json::json!({
+                                                    "jsonrpc": "2.0",
+                                                    "id": request.get("id"),
+                                                    "error": {"code": -32602, "message": "Invalid params"}
+                                                });
+                                                return Ok(Json(response));
                                             }
                                         };
 
@@ -1915,11 +2298,21 @@ pub async fn mcp_handler(
                                         }
                                         Err(e) => {
                                             error!("Failed to batch add code entities: {}", e);
-                                            Err(StatusCode::INTERNAL_SERVER_ERROR)
+                                            let response = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": request.get("id"),
+                                                "error": {"code": -32000, "message": "Internal error"}
+                                            });
+                                            Ok(Json(response))
                                         }
                                     }
                                 } else {
-                                    Err(StatusCode::BAD_REQUEST)
+                                    let response = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": request.get("id"),
+                                        "error": {"code": -32602, "message": "Missing arguments"}
+                                    });
+                                    Ok(Json(response))
                                 }
                             }
                             "batch_record_activities" => {
@@ -1928,11 +2321,13 @@ pub async fn mcp_handler(
                                         match serde_json::from_value(args.clone()) {
                                             Ok(req) => req,
                                             Err(e) => {
-                                                error!(
-                                                    "Failed to parse batch_record_activities request: {}",
-                                                    e
-                                                );
-                                                return Err(StatusCode::BAD_REQUEST);
+                                                error!("Failed to parse batch_record_activities request: {}", e);
+                                                let response = serde_json::json!({
+                                                    "jsonrpc": "2.0",
+                                                    "id": request.get("id"),
+                                                    "error": {"code": -32602, "message": "Invalid params"}
+                                                });
+                                                return Ok(Json(response));
                                             }
                                         };
 
@@ -1953,11 +2348,21 @@ pub async fn mcp_handler(
                                         }
                                         Err(e) => {
                                             error!("Failed to batch record activities: {}", e);
-                                            Err(StatusCode::INTERNAL_SERVER_ERROR)
+                                            let response = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": request.get("id"),
+                                                "error": {"code": -32000, "message": "Internal error"}
+                                            });
+                                            Ok(Json(response))
                                         }
                                     }
                                 } else {
-                                    Err(StatusCode::BAD_REQUEST)
+                                    let response = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": request.get("id"),
+                                        "error": {"code": -32602, "message": "Missing arguments"}
+                                    });
+                                    Ok(Json(response))
                                 }
                             }
                             "get_context_suggestions" => {
@@ -2068,12 +2473,20 @@ pub async fn mcp_handler(
                             }
                             "get_related_memories" => {
                                 if let Some(args) = params.get("arguments") {
-                                    let memory_id_str = args
+                                    let memory_id = match args
                                         .get("id")
                                         .and_then(|id| id.as_str())
-                                        .ok_or(StatusCode::BAD_REQUEST)?;
-                                    let memory_id = uuid::Uuid::parse_str(memory_id_str)
-                                        .map_err(|_| StatusCode::BAD_REQUEST)?;
+                                        .and_then(|s| uuid::Uuid::parse_str(s).ok()) {
+                                        Some(v) => v,
+                                        None => {
+                                            let response = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": request.get("id"),
+                                                "error": {"code": -32602, "message": "Invalid params: id"}
+                                            });
+                                            return Ok(Json(response));
+                                        }
+                                    };
                                     let depth =
                                         args.get("depth").and_then(|d| d.as_i64()).unwrap_or(1)
                                             as usize;
@@ -2094,20 +2507,47 @@ pub async fn mcp_handler(
                                         }
                                         Err(e) => {
                                             error!("Failed to get related memories: {}", e);
-                                            Err(StatusCode::INTERNAL_SERVER_ERROR)
+                                            let response = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": request.get("id"),
+                                                "error": {"code": -32000, "message": "Internal error"}
+                                            });
+                                            Ok(Json(response))
                                         }
                                     }
                                 } else {
-                                    Err(StatusCode::BAD_REQUEST)
+                                    let response = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "id": request.get("id"),
+                                        "error": {"code": -32602, "message": "Missing arguments"}
+                                    });
+                                    Ok(Json(response))
                                 }
                             }
-                            _ => Err(StatusCode::NOT_FOUND),
+                            _ => {
+                                let response = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": request.get("id"),
+                                    "error": {"code": -32601, "message": "Method not found"}
+                                });
+                                Ok(Json(response))
+                            },
                         }
                     } else {
-                        Err(StatusCode::BAD_REQUEST)
+                        let response = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": request.get("id"),
+                            "error": {"code": -32600, "message": "Invalid request"}
+                        });
+                        Ok(Json(response))
                     }
                 } else {
-                    Err(StatusCode::BAD_REQUEST)
+                    let response = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request.get("id"),
+                        "error": {"code": -32600, "message": "Invalid request"}
+                    });
+                    Ok(Json(response))
                 }
             }
             _ => {
@@ -2123,7 +2563,12 @@ pub async fn mcp_handler(
             }
         }
     } else {
-        Err(StatusCode::BAD_REQUEST)
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request.get("id"),
+            "error": {"code": -32600, "message": "Invalid request"}
+        });
+        Ok(Json(response))
     }
 }
 
@@ -2133,20 +2578,78 @@ async fn health_check() -> StatusCode {
     StatusCode::OK
 }
 
-/// Readiness probe: ensure storage is reachable
+/// Readiness probe: ensure storage is reachable and embedding is ready (best-effort)
 async fn ready_check(State(state): State<AppState>) -> StatusCode {
-    // Try a lightweight operation: read episodes list from in-memory index; storage ping could be added
-    // If in-memory index is accessible, consider ready; for stricter checks, query storage
-    let _ = state.project_scanner.clone();
+    // 1) Storage lightweight check
+    if state.graphiti.get_episodes(1).await.is_err() {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
+
+    // 2) Embedding readiness (best-effort):
+    // Try a tiny embedding call with a short timeout; if it fails, we still return 503
+    let embed_ready = tokio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        async {
+            // Use a minimal call path by asking for a single token string
+            // We don't have direct embedding client in state; go through public API path
+            // by adding a tiny memory (best-effort) and then searching.
+            // To avoid side effects, we simply attempt a search which triggers lazy embed in some paths.
+            let req = SearchMemoryRequest {
+                query: "ready-check".to_string(),
+                limit: Some(1),
+                start_time: None,
+                end_time: None,
+                entity_types: None,
+            };
+            state.graphiti.search_memory(req).await.map(|_| ())
+        },
+    )
+    .await
+    .map(|r| r.is_ok())
+    .unwrap_or(false);
+
+    // Also consider degraded placeholder embedder as not ready
+    let degraded = EMBEDDING_DEGRADED
+        .get()
+        .map(|f| f.load(Ordering::Relaxed))
+        .unwrap_or(false);
+
+    if !embed_ready || degraded {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
     StatusCode::OK
 }
 
-fn build_cors_layer() -> CorsLayer {
-    // Tighten as needed: allow any origin/methods for now with limited headers
-    CorsLayer::new()
+fn build_cors_layer(server: &ServerSettings) -> CorsLayer {
+    let mut layer = CorsLayer::new()
         .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
-        .allow_origin(Any)
-        .allow_headers(Any)
+        // In production, restrict headers to common ones
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::ACCEPT,
+        ]);
+
+    if let Some(origins) = &server.allowed_origins {
+        if origins.iter().any(|o| o == "*") {
+            layer = layer.allow_origin(Any);
+        } else {
+            let values: Vec<HeaderValue> = origins
+                .iter()
+                .filter_map(|o| HeaderValue::from_str(o).ok())
+                .collect();
+            if !values.is_empty() {
+                layer = layer.allow_origin(values);
+            } else {
+                layer = layer.allow_origin(Any);
+            }
+        }
+    } else {
+        // Default to any in absence of explicit configuration
+        layer = layer.allow_origin(Any);
+    }
+
+    layer
 }
 
 async fn rate_limit_guard(
@@ -2163,7 +2666,11 @@ async fn auth_guard(
     req: HttpRequest<Body>,
     next: middleware::Next,
 ) -> std::result::Result<Response, StatusCode> {
-    if let Some(expected) = &state.auth_token {
+    if state.require_auth {
+        let expected = match &state.auth_token {
+            Some(v) => v,
+            None => return Err(StatusCode::UNAUTHORIZED),
+        };
         let headers = req.headers();
         if !is_authorized(headers, expected) { return Err(StatusCode::UNAUTHORIZED); }
     }
@@ -2295,6 +2802,10 @@ async fn metrics() -> String {
 static METRICS_EXPORTER: once_cell::sync::OnceCell<PrometheusHandle> =
     once_cell::sync::OnceCell::new();
 
+// Global degraded flag for embedding subsystem
+static EMBEDDING_DEGRADED: once_cell::sync::OnceCell<AtomicBool> =
+    once_cell::sync::OnceCell::new();
+
 fn init_metrics() -> anyhow::Result<()> {
     if METRICS_EXPORTER.get().is_some() {
         return Ok(());
@@ -2327,6 +2838,38 @@ struct RealGraphitiService {
 }
 
 impl RealGraphitiService {
+    fn cache_limits() -> (usize, usize, usize) {
+        // (episodes, relationships_vec, relationships_map)
+        let eps = std::env::var("GRAPHITI_CACHE_MAX_EPISODES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000usize);
+        let rels = std::env::var("GRAPHITI_CACHE_MAX_RELATIONSHIPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5000usize);
+        let relmap = std::env::var("GRAPHITI_CACHE_MAX_REL_MAP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(5000usize);
+        (eps, rels, relmap)
+    }
+
+    fn prune_episode_index_map(map: &mut HashMap<Uuid, EpisodeNode>, max_items: usize) {
+        let len = map.len();
+        if len <= max_items { return; }
+        // Collect and sort by created_at (oldest first)
+        let mut items: Vec<(Uuid, i64)> = map
+            .iter()
+            .map(|(k, v)| (*k, v.temporal.created_at.timestamp()))
+            .collect();
+        items.sort_by_key(|(_, ts)| *ts);
+        let remove_count = len - max_items;
+        for (k, _) in items.into_iter().take(remove_count) {
+            map.remove(&k);
+        }
+    }
+
     async fn new(
         storage: Arc<CozoDriver>,
         llm_config: LLMConfig,
@@ -2347,40 +2890,102 @@ impl RealGraphitiService {
         };
 
         // Create embedder client based on provider
+        EMBEDDING_DEGRADED.get_or_init(|| AtomicBool::new(false));
+
         let embedder: Arc<dyn EmbeddingClient> = match embedder_config.provider {
-            EmbeddingProvider::QwenCandle => {
-                info!("Using Qwen Candle embedder (pure Rust)");
-                let cache_dir = std::env::var("QWEN_CANDLE_CACHE_DIR")
-                    .ok()
-                    .map(std::path::PathBuf::from)
-                    .or(Some(std::path::PathBuf::from("./Qwen3-Embedding-0.6B")));
-                let qwen_config = QwenCandleConfig {
-                    model_repo: embedder_config.model.clone(),
-                    device: detect_device(),
-                    dimension: embedder_config.dimension,
-                    batch_size: embedder_config.batch_size,
-                    max_length: 8192,
-                    normalize: true,
-                    offline: true, // 默认使用离线模式
-                    revision: "main".to_string(),
-                    cache_dir,
-                    dtype: graphiti_llm::candle_core::DType::F32,
-                };
-                Arc::new(QwenCandleClient::new(qwen_config)?)
-            }
-            EmbeddingProvider::Qwen3EmbedAnything => {
-                info!("Using Qwen3-Embedding with embed_anything (recommended)");
-                let qwen3_config = Qwen3EmbedAnythingConfig {
+            EmbeddingProvider::EmbedAnything => {
+                info!("Using generic embed_anything embedder (HF model)");
+                // 使用配置中指定的 HF 模型（默认 embeddinggemma-300m）
+                let cfg = graphiti_llm::EmbedAnythingConfig {
                     model_id: embedder_config.model.clone(),
-                    batch_size: embedder_config.batch_size,
-                    max_length: 8192,           // Qwen3 supports up to 32K
-                    device: "auto".to_string(), // Auto-detect best device
+                    batch_size: embedder_config.batch_size.max(16),
+                    max_length: embedder_config.max_length.unwrap_or(8192),
+                    device: embedder_config
+                        .device
+                        .clone()
+                        .unwrap_or_else(|| "auto".to_string()),
+                    cache_dir: embedder_config
+                        .cache_dir
+                        .clone()
+                        .or_else(|| std::env::var("EMBEDDING_MODEL_DIR").ok()),
+                    target_dim: Some(768),
                 };
-                Arc::new(Qwen3EmbedAnythingClient::new(qwen3_config).await?)
+                match graphiti_llm::EmbedAnythingClient::new(cfg).await {
+                    Ok(client) => Arc::new(client),
+                    Err(e) => {
+                        warn!(
+                            "EmbedAnything initialization failed: {}. Falling back to GemmaCandleApprox.",
+                            e
+                        );
+                        let model_dir = embedder_config
+                            .cache_dir
+                            .clone()
+                            .map(std::path::PathBuf::from)
+                            .or_else(|| std::env::var("EMBEDDING_MODEL_DIR").ok().map(std::path::PathBuf::from));
+                        let fallback_cfg = graphiti_llm::GemmaCandleConfig {
+                            model_dir,
+                            device: embedder_config
+                                .device
+                                .clone()
+                                .unwrap_or_else(|| "auto".to_string()),
+                            target_dim: embedder_config.dimension,
+                            normalize: true,
+                        };
+                        match graphiti_llm::GemmaCandleClient::new(fallback_cfg) {
+                            Ok(client) => Arc::new(client),
+                            Err(e2) => {
+                                warn!("GemmaCandle fallback failed: {}. Using disabled placeholder embedder.", e2);
+                                EMBEDDING_DEGRADED.get().unwrap().store(true, Ordering::Relaxed);
+                                // Disabled placeholder embedder
+                                struct DisabledEmbedder { dim: usize }
+                                #[async_trait::async_trait]
+                                impl graphiti_llm::EmbeddingClient for DisabledEmbedder {
+                                    async fn embed_batch(&self, texts: &[String]) -> graphiti_core::error::Result<Vec<Vec<f32>>> {
+                                        Ok(texts.iter().map(|_| vec![0.0; self.dim]).collect())
+                                    }
+                                }
+                                Arc::new(DisabledEmbedder { dim: embedder_config.dimension.max(128) })
+                            }
+                        }
+                    }
+                }
+            }
+            EmbeddingProvider::GemmaCandleApprox => {
+                info!("Using native Candle Gemma approximate embedder (tokenizer-only)");
+                let model_dir = embedder_config
+                    .cache_dir
+                    .clone()
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| std::env::var("EMBEDDING_MODEL_DIR").ok().map(std::path::PathBuf::from));
+                let cfg = graphiti_llm::GemmaCandleConfig {
+                    model_dir,
+                    device: embedder_config
+                        .device
+                        .clone()
+                        .unwrap_or_else(|| "auto".to_string()),
+                    target_dim: embedder_config.dimension,
+                    normalize: true,
+                };
+                match graphiti_llm::GemmaCandleClient::new(cfg) {
+                    Ok(client) => Arc::new(client),
+                    Err(e2) => {
+                        warn!("GemmaCandle initialization failed: {}. Using disabled placeholder embedder.", e2);
+                        EMBEDDING_DEGRADED.get().unwrap().store(true, Ordering::Relaxed);
+                        struct DisabledEmbedder { dim: usize }
+                        #[async_trait::async_trait]
+                        impl graphiti_llm::EmbeddingClient for DisabledEmbedder {
+                            async fn embed_batch(&self, texts: &[String]) -> graphiti_core::error::Result<Vec<Vec<f32>>> {
+                                Ok(texts.iter().map(|_| vec![0.0; self.dim]).collect())
+                            }
+                        }
+                        Arc::new(DisabledEmbedder { dim: embedder_config.dimension.max(128) })
+                    }
+                }
             }
             _ => {
-                info!("Using generic embedder client");
-                Arc::new(EmbedderClient::new(embedder_config)?)
+                return Err(anyhow::anyhow!(
+                    "Unsupported embedder provider for server: use 'embed_anything' or 'gemma_candle'"
+                ));
             }
         };
 
@@ -2587,6 +3192,8 @@ impl GraphitiService for RealGraphitiService {
         {
             let mut idx = self.memory_index.write().await;
             idx.insert(episode_id, episode.clone());
+            let (max_eps, _, _) = Self::cache_limits();
+            Self::prune_episode_index_map(&mut idx, max_eps);
         }
 
         // Perform lightweight entity and relationship extraction (best-effort)
@@ -2631,12 +3238,24 @@ impl GraphitiService for RealGraphitiService {
         {
             let mut rels = self.memory_relationships.write().await;
             rels.extend(simple_relationships.iter().cloned());
+            let (_, max_rels, _) = Self::cache_limits();
+            if rels.len() > max_rels {
+                let extra = rels.len() - max_rels;
+                rels.drain(0..extra);
+            }
         }
         {
             let mut rel_map = self.memory_relationships_by_id.write().await;
             for r in &simple_relationships {
                 let id = Uuid::new_v4();
                 rel_map.insert(id, r.clone());
+            }
+            let (_, _, max_relmap) = Self::cache_limits();
+            if rel_map.len() > max_relmap {
+                let extra = rel_map.len() - max_relmap;
+                // Remove arbitrary first 'extra' keys
+                let keys: Vec<Uuid> = rel_map.keys().cloned().take(extra).collect();
+                for k in keys { let _ = rel_map.remove(&k); }
             }
         }
 

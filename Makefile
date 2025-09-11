@@ -83,6 +83,13 @@ docker-reset:
 	docker-compose up -d
 	@echo "✅ Reset completed"
 
+# Production docker
+docker-prod:
+	@echo "🚀 Starting production stack with hardening..."
+	docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+	@echo "✅ Production services started:"
+	@echo "   - MCP Server: http://localhost:8080"
+
 # Ollama model management
 ollama-setup:
 	@echo "🦙 Setting up Ollama models..."

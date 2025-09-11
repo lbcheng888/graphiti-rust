@@ -1,0 +1,72 @@
+version: '3.8'
+
+services:
+  graphiti:
+    restart: unless-stopped
+    environment:
+      - MCP_SERVER_HOST=0.0.0.0
+      - MCP_SERVER_PORT=8080
+      - RUST_LOG=info,graphiti=info
+      # Provide the auth token via env or secret manager
+      - GRAPHITI_AUTH_TOKEN=${GRAPHITI_AUTH_TOKEN}
+    command: ["--config", "/etc/graphiti/config.prod.toml", "--host", "0.0.0.0", "--port", "8080", "--project", "/var/lib/graphiti/data"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    volumes:
+      - ./config.prod.toml:/etc/graphiti/config.prod.toml:ro
+      - graphiti_data:/var/lib/graphiti/data
+      - graphiti_search:/var/lib/graphiti/search
+      - graphiti_vectors:/var/lib/graphiti/vectors
+      # Mount TLS certs if terminating TLS in the app (optional)
+      # - ./tls:/etc/graphiti/tls:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  graphiti-free:
+    profiles: ["free"]
+    restart: unless-stopped
+    environment:
+      - MCP_SERVER_HOST=0.0.0.0
+      - MCP_SERVER_PORT=8091
+      - RUST_LOG=info,graphiti=debug
+    command: ["--config", "/etc/graphiti/config.free.toml", "--host", "0.0.0.0", "--port", "8091", "--project", "/var/lib/graphiti/data"]
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    ulimits:
+      nofile:
+        soft: 4096
+        hard: 8192
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  graphiti_data:
+  graphiti_search:
+  graphiti_vectors:
+

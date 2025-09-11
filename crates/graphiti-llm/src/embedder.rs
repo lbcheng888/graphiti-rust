@@ -51,6 +51,15 @@ pub struct EmbedderConfig {
     /// Request timeout
     #[serde(with = "duration_serde")]
     pub timeout: Duration,
+    /// Preferred device (cpu/cuda/metal/auto), optional
+    #[serde(default)]
+    pub device: Option<String>,
+    /// Max sequence length, optional
+    #[serde(default)]
+    pub max_length: Option<usize>,
+    /// Optional local cache directory for HF models
+    #[serde(default)]
+    pub cache_dir: Option<String>,
 }
 
 /// Embedding provider
@@ -72,19 +81,29 @@ pub enum EmbeddingProvider {
     /// Qwen model using Candle (pure Rust)
     QwenCandle,
     /// Qwen3-Embedding using embed_anything crate
+    #[serde(alias = "qwen3_embed_anything")]
     Qwen3EmbedAnything,
+    /// Generic embed_anything backend (HF model via Candle)
+    #[serde(alias = "embed_anything")]
+    EmbedAnything,
+    /// Native Candle Gemma (approximate, tokenizer-only)
+    #[serde(alias = "gemma_candle")]
+    GemmaCandleApprox,
 }
 
 impl Default for EmbedderConfig {
     fn default() -> Self {
         Self {
-            // Default to Local sentence-transformers for deterministic tests
-            provider: EmbeddingProvider::Local,
+            // 默认使用原生 Candle 近似（无需权重，仅需 tokenizer.json）
+            provider: EmbeddingProvider::GemmaCandleApprox,
             api_key: String::new(),
-            model: "sentence-transformers/all-MiniLM-L6-v2".to_string(),
-            dimension: 384,
+            model: "google/embeddinggemma-300m".to_string(),
+            dimension: 768,
             batch_size: 32,
             timeout: Duration::from_secs(60),
+            device: Some("auto".to_string()),
+            max_length: Some(8192),
+            cache_dir: None,
         }
     }
 }
@@ -116,24 +135,7 @@ pub struct EmbedderClient {
 impl EmbedderClient {
     /// Create a new embedder client
     pub fn new(config: EmbedderConfig) -> Result<Self> {
-        // API key is only required for some cloud providers
-        match config.provider {
-            EmbeddingProvider::OpenAI | EmbeddingProvider::Voyage | EmbeddingProvider::Cohere => {
-                if config.api_key.is_empty() {
-                    return Err(Error::Configuration(format!(
-                        "{:?} embedding API key is required",
-                        config.provider
-                    )));
-                }
-            }
-            EmbeddingProvider::Local
-            | EmbeddingProvider::Ollama
-            | EmbeddingProvider::HuggingFace
-            | EmbeddingProvider::QwenCandle
-            | EmbeddingProvider::Qwen3EmbedAnything => {
-                // No API key required for local models or HF free tier
-            }
-        }
+        // 仅支持 EmbedAnything，其它方案将在上层屏蔽
 
         let client = Client::builder()
             .timeout(config.timeout)
@@ -155,16 +157,7 @@ impl EmbedderClient {
 
     /// Get the base URL for the provider
     fn base_url(&self) -> &str {
-        match self.config.provider {
-            EmbeddingProvider::OpenAI => "https://api.openai.com/v1",
-            EmbeddingProvider::Voyage => "https://api.voyageai.com/v1",
-            EmbeddingProvider::Cohere => "https://api.cohere.ai/v1",
-            EmbeddingProvider::Local => "http://localhost:8000", // Default local server
-            EmbeddingProvider::Ollama => "http://localhost:11434",
-            EmbeddingProvider::HuggingFace => "https://api-inference.huggingface.co/models",
-            EmbeddingProvider::QwenCandle => "", // Not used for Candle-based models
-            EmbeddingProvider::Qwen3EmbedAnything => "", // Not used for embed_anything-based models
-        }
+        ""
     }
 }
 
@@ -263,6 +256,18 @@ impl EmbeddingClient for EmbedderClient {
                 EmbeddingProvider::Qwen3EmbedAnything => {
                     return Err(Error::Configuration(
                         "Qwen3EmbedAnything should be handled by Qwen3EmbedAnythingClient, not EmbedderClient"
+                            .to_string(),
+                    ));
+                }
+                EmbeddingProvider::EmbedAnything => {
+                    return Err(Error::Configuration(
+                        "EmbedAnything should be handled by EmbedAnythingClient, not EmbedderClient"
+                            .to_string(),
+                    ));
+                }
+                EmbeddingProvider::GemmaCandleApprox => {
+                    return Err(Error::Configuration(
+                        "GemmaCandleApprox should be handled by GemmaCandleClient, not EmbedderClient"
                             .to_string(),
                     ));
                 }

@@ -1,0 +1,43 @@
+# Graphiti MCP Server Production Configuration
+
+[server]
+host = "0.0.0.0"
+port = 8080
+log_level = "info"
+require_auth = true
+# Replace with your domains (no wildcard unless necessary)
+allowed_origins = ["https://your.domain"]
+# Uncomment to enable TLS directly on the server (or terminate at a proxy)
+# tls = { cert_path = "/etc/graphiti/tls/tls.crt", key_path = "/etc/graphiti/tls/tls.key" }
+
+[cozo]
+# Use a persistent engine for production (sqlite or rocksdb)
+engine = "sqlite"
+path = "./data/graphiti.db"
+options = {}
+
+[llm]
+# LLM optional for core features; embeddings are recommended
+provider = "ollama"
+model = "disabled"
+
+[embedder]
+# Choose an embedding model suitable to your hardware
+provider = "ollama"
+model = "nomic-embed-text:latest"
+dimension = 768
+batch_size = 16
+timeout = 120
+
+[graphiti]
+name = "production"
+enable_deduplication = true
+min_entity_confidence = 0.7
+min_relationship_confidence = 0.6
+max_context_window = 4000
+generate_embeddings = true
+
+[storage]
+search_index_path = "./data/search"
+vector_index_path = "./data/vectors"
+

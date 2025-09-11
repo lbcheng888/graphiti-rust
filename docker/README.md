@@ -293,6 +293,18 @@ docker stats
 1. **Change default passwords** in production
 2. **Use environment variables** for sensitive data
 3. **Enable TLS** for production deployments
+4. **Set `GRAPHITI_AUTH_TOKEN`** and keep it secret (required by default in production)
+
+## Production Deployment
+
+Use the production override file with hardening options:
+
+```bash
+# Ensure .env contains a strong GRAPHITI_AUTH_TOKEN
+docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+See also: `docs/PRODUCTION.md` for Kubernetes manifests and reverse proxy examples.
 4. **Restrict network access** using Docker networks
 
 ## License

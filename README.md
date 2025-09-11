@@ -58,7 +58,9 @@ This is an active development project. The following components have been implem
 - ✅ Storage trait and CozoDB driver implementation (pure Rust)
 - ✅ Text search with Tantivy and vector search
 - ✅ Multi-LLM client support (OpenAI, Ollama, HuggingFace, Groq)
-- ✅ Qwen3-Embedding-8B integration via HuggingFace
+- ✅ EmbeddingGemma-300m via Candle
+  - Native approximate (tokenizer-only, zero deps, 768-dim)
+  - Or embed_anything (Candle backend, higher semantic fidelity)
 - ✅ MCP server with REST API endpoints
 - ✅ Free operation mode (Ollama + HuggingFace)
 - ✅ Claude Desktop integration ready
@@ -113,6 +115,13 @@ curl -fsSL https://ollama.com/install.sh | sh
 ollama pull llama3.1:8b
 
 # Start the MCP server with free configuration
+# Prefer env vars to avoid hardcoded paths
+EMBEDDING_MODEL_DIR=/path/to/embeddinggemma-300m \
+GRAPHITI_PROJECT=. \
+GRAPHITI_DATA_DIR=.graphiti/data \
+GRAPHITI_CONFIG_FORCE=1 \
+GRAPHITI_ENABLE_INITIAL_SCAN=0 \
+HF_HUB_OFFLINE=1 \
 ./target/release/graphiti-mcp-server --config config.free.toml
 
 # Test the server
@@ -132,8 +141,15 @@ cargo build --release
 # Run tests
 cargo test
 
-# Run the MCP server
-cargo run --bin graphiti-mcp-server
+# Run the MCP server (stdio; default = native Candle approximate)
+EMBEDDING_MODEL_DIR=/path/to/embeddinggemma-300m \
+GRAPHITI_PROJECT=. \
+GRAPHITI_DATA_DIR=.graphiti/data \
+RUST_LOG=info,graphiti=debug \
+GRAPHITI_CONFIG_FORCE=1 \
+GRAPHITI_ENABLE_INITIAL_SCAN=0 \
+HF_HUB_OFFLINE=1 \
+cargo run --bin graphiti-mcp-server -- --stdio --log-level info --config ./config.free.toml
 ```
 
 ### Development
@@ -208,6 +224,8 @@ The Docker setup supports multiple deployment profiles:
 
 For detailed Docker documentation, see [docker/README.md](docker/README.md).
 
+For production hardening and deployment options (Docker/Kubernetes), see [docs/PRODUCTION.md](docs/PRODUCTION.md).
+
 ## API Endpoints
 
 The MCP server exposes the following REST API endpoints:
@@ -272,7 +290,7 @@ model = "llama3.1:8b"
 
 [embedder]
 provider = "huggingface"
-model = "Qwen/Qwen3-Embedding-8B"
+model = "google/embeddinggemma-300m"
 dimension = 4096
 
 [cozo]

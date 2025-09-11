@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: graphiti-config
+data:
+  config.toml: |
+    # Mounted as /etc/graphiti/config.toml
+    [server]
+    host = "0.0.0.0"
+    port = 8080
+    log_level = "info"
+    require_auth = true
+    allowed_origins = ["https://your.domain"]
+
+    [cozo]
+    engine = "sqlite"
+    path = "./data/graphiti.db"
+    options = {}
+
+    [llm]
+    provider = "ollama"
+    model = "disabled"
+
+    [embedder]
+    provider = "ollama"
+    model = "nomic-embed-text:latest"
+    dimension = 768
+    batch_size = 16
+    timeout = 120
+
+    [graphiti]
+    name = "production"
+    enable_deduplication = true
+    min_entity_confidence = 0.7
+    min_relationship_confidence = 0.6
+    max_context_window = 4000
+    generate_embeddings = true
+
+    [storage]
+    search_index_path = "./data/search"
+    vector_index_path = "./data/vectors"

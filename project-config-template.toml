@@ -10,6 +10,8 @@ requests_per_second = 80
 request_timeout_seconds = 30
 request_body_limit_bytes = 1048576 # 1MB
 buffer_capacity = 1024
+require_auth = true
+allowed_origins = ["http://localhost:8080"]
 
 [cozo]
 # 默认使用 sqlite 并将数据库落在项目工作目录的 .graphiti/data/graphiti.db
@@ -26,11 +28,13 @@ temperature = 0.7
 max_tokens = 2048
 
 [embedder]
-# Embedding configuration - using local Qwen3 model
-provider = "qwen3_embed_anything"
-model = "Qwen/Qwen3-Embedding-0.6B"
+# Embedding configuration - default to native Candle approximate (tokenizer-only)
+provider = "gemma_candle"
+model = "google/embeddinggemma-300m"
+dimension = 768
 device = "auto"
 batch_size = 32
+timeout = 120
 
 [graphiti]
 # Graphiti-specific settings

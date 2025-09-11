@@ -253,20 +253,19 @@ pub struct ConsoleNotificationChannel;
 #[async_trait]
 impl NotificationChannel for ConsoleNotificationChannel {
     async fn send_notification(&self, notification: &LearningNotification) -> LearningResult<()> {
+        // 使用 tracing 将控制台输出重定向到 stderr，避免污染 MCP stdio 的 stdout
         let level_str = format!("{} {:?}", notification.level.emoji(), notification.level);
-        println!("\n[LEARNING] {} {}", level_str, notification.title);
-        println!("   NOTE {}", notification.message);
+        info!("[LEARNING] {} {}", level_str, notification.title);
+        info!("NOTE: {}", notification.message);
 
         if !notification.actions.is_empty() {
-            println!("   Actions:");
+            info!("Actions:");
             for action in &notification.actions {
-                println!("      - {}", action.label);
+                info!("  - {}", action.label);
             }
         }
 
-        println!("   ⏰ {}", notification.created_at.format("%H:%M:%S"));
-        println!();
-
+        info!("⏰ {}", notification.created_at.format("%H:%M:%S"));
         Ok(())
     }
 
