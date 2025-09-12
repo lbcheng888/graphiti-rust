@@ -743,6 +743,25 @@ impl GraphStorage for CozoDriver {
 
     #[instrument(skip(self))]
     async fn create_edge(&self, edge: &Edge) -> Result<()> {
+        // Best-effort dedup by signature (src, tgt, rel, src_symbol, dst_symbol)
+        #[cfg(feature = "backend-sqlx")]
+        if !(self._config.engine == "mem" || self._config.engine == "rocksdb") {
+            let src_sym = edge.properties.get("src_symbol").and_then(|v| v.as_str());
+            let dst_sym = edge.properties.get("dst_symbol").and_then(|v| v.as_str());
+            let row_opt = sqlx::query(
+                "SELECT id FROM edges WHERE source_id=? AND target_id=? AND relationship=? AND json_extract(properties,'$.src_symbol') IS ? AND json_extract(properties,'$.dst_symbol') IS ? LIMIT 1"
+            )
+            .bind(edge.source_id.to_string())
+            .bind(edge.target_id.to_string())
+            .bind(&edge.relationship)
+            .bind(src_sym)
+            .bind(dst_sym)
+            .fetch_optional(&* self.pool)
+            .await
+            .map_err(|e| Error::Storage(format!("pre-check duplicate edge failed: {}", e)))?;
+            if row_opt.is_some() { return Ok(()); }
+        }
+
         let (created_at, valid_from, valid_to, expired_at) =
             self.temporal_to_timestamps(&edge.temporal);
 
@@ -761,6 +780,23 @@ impl GraphStorage for CozoDriver {
             {
                 let _permit = self.write_lock.acquire().await.unwrap();
                 let props = edge.properties.to_string();
+                // Re-check in transaction (TOCTOU best-effort)
+                {
+                    let src_sym = edge.properties.get("src_symbol").and_then(|v| v.as_str());
+                    let dst_sym = edge.properties.get("dst_symbol").and_then(|v| v.as_str());
+                    let row_opt = sqlx::query(
+                        "SELECT id FROM edges WHERE source_id=? AND target_id=? AND relationship=? AND json_extract(properties,'$.src_symbol') IS ? AND json_extract(properties,'$.dst_symbol') IS ? LIMIT 1"
+                    )
+                    .bind(edge.source_id.to_string())
+                    .bind(edge.target_id.to_string())
+                    .bind(&edge.relationship)
+                    .bind(src_sym)
+                    .bind(dst_sym)
+                    .fetch_optional(&* self.pool)
+                    .await
+                    .map_err(|e| Error::Storage(format!("pre-check duplicate edge in-tx failed: {}", e)))?;
+                    if row_opt.is_some() { return Ok(()); }
+                }
                 sqlx::query("INSERT INTO edges(id,source_id,target_id,relationship,properties,created_at,valid_from,valid_to,expired_at,weight) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source_id=excluded.source_id,target_id=excluded.target_id,relationship=excluded.relationship,properties=excluded.properties,created_at=excluded.created_at,valid_from=excluded.valid_from,valid_to=excluded.valid_to,expired_at=excluded.expired_at,weight=excluded.weight")
                     .bind(edge.id.to_string())
                     .bind(edge.source_id.to_string())

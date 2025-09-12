@@ -9,6 +9,8 @@ members = [
     "crates/graphiti-ner",
     "crates/graphiti-prompts",
     "crates/graphiti-distributed",
+    "crates/graphiti-context",
+    "crates/graphiti-context-cli",
 ]
 
 [workspace.package]
@@ -38,6 +40,11 @@ libp2p-swarm = "0.45"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_with = "3.11"
+globset = "0.4"
+ignore = "0.4"
+dirs = "5.0"
+bytemuck = "1.14"
+regex = "1.10"
 
 # Database drivers
 cozo = { version = "0.7", default-features = false, features = ["graph-algo"] }
@@ -49,6 +56,8 @@ candle-transformers = { version = "0.9.1" }
 tokenizers = { version = "0.20" }
 hf-hub = { version = "0.3", features = ["tokio"] }
 rust-bert = { version = "0.23" }
+qdrant-client = "1.15.0"
+md-5 = "0.10"
 
 # Search
 tantivy = "0.22"
@@ -173,3 +182,4 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
+regex = "1.10"

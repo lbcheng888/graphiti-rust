@@ -8,7 +8,7 @@ repository.workspace = true
 
 [[bin]]
 name = "graphiti-mcp-server"
-path = "src/main.rs"
+path = "src/bin/graphiti-mcp-server.rs"
 
 [dependencies]
 # Local dependencies
@@ -17,6 +17,7 @@ graphiti-cozo = { path = "../graphiti-cozo" }
 graphiti-search = { path = "../graphiti-search" }
 graphiti-llm = { path = "../graphiti-llm", features = ["embed-anything"] }
 graphiti-ner = { path = "../graphiti-ner" }
+graphiti-context = { path = "../graphiti-context" }
 
 # Async
 tokio.workspace = true
@@ -32,6 +33,10 @@ tower-http = { workspace = true, features = ["trace", "cors", "timeout", "limit"
 futures-util = "0.3"
 async-stream = "0.3"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
+pathdiff = "0.2"
+reqwest = { workspace = true }
+dirs = { workspace = true }
+once_cell = { workspace = true }
 
 # Serialization
 serde.workspace = true
@@ -45,6 +50,9 @@ thiserror.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 glob = "0.3"
+walkdir = "2"
+globset = { workspace = true }
+regex = { workspace = true }
 
 # Logging and tracing
 tracing.workspace = true
@@ -62,7 +70,10 @@ dotenvy.workspace = true
 # Rate limiting & utilities
 governor.workspace = true
 nonzero_ext.workspace = true
-once_cell.workspace = true
+qdrant-client = { workspace = true }
+md-5 = { workspace = true }
+whoami = "1.5"
+url = "2.5"
 
 # Metrics (already declared above)
 

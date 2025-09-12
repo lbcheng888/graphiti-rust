@@ -14,7 +14,7 @@ data:
 
     [cozo]
     engine = "sqlite"
-    path = "./data/graphiti.db"
+    path = "./.graphiti/data/graphiti.db"
     options = {}
 
     [llm]
@@ -37,5 +37,5 @@ data:
     generate_embeddings = true
 
     [storage]
-    search_index_path = "./data/search"
-    vector_index_path = "./data/vectors"
+    search_index_path = "./.graphiti/data/search"
+    vector_index_path = "./.graphiti/data/vectors"

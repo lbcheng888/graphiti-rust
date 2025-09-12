@@ -1,6 +1,6 @@
 //! Advanced AST parsing for multiple programming languages
 
-use crate::AddCodeEntityRequest;
+use crate::types::AddCodeEntityRequest;
 use serde::Deserialize;
 use serde::Serialize;
 use std::path::Path;

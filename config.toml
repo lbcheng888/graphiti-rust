@@ -14,7 +14,7 @@ allowed_origins = ["http://localhost:8080"]
 [cozo]
 # Use sqlite/rocksdb in production for persistence
 engine = "sqlite"
-path = "./data/graphiti.db"
+path = "./.graphiti/data/graphiti.db"
 options = {}
 
 # LLM Configuration - Choose one provider
@@ -68,17 +68,17 @@ rate_limit = 60
 # Note: Set API keys in environment variables for cloud providers
 
 [embedder]
-# 使用 embed_anything（Candle 后端）+ 本地缓存的 HF 模型以获得更高语义质量（完全本地、离线可用）
+# 统一 Qwen3-Embedding（1024 维）+ embed_anything（Candle 后端）；推荐通过 EMBEDDING_MODEL_DIR 指向本地模型目录
 provider = "embed_anything"
-model = "google/embeddinggemma-300m"
-dimension = 768
-batch_size = 16
+model = "Qwen/Qwen3-Embedding-0.6B"
+dimension = 1024
+batch_size = 32
 timeout = 120
 api_key = ""
 device = "auto"
 max_length = 8192
-# 不写死模型目录，推荐通过环境变量 EMBEDDING_MODEL_DIR 指向实际路径
-# cache_dir = "./models/embeddinggemma-300m"
+# 可选：本地缓存/离线目录（示例为本机路径）
+cache_dir = "./.graphiti/models/Qwen3-Embedding-0.6B"
 
 [embedder.openai]
 model = "text-embedding-3-small"
@@ -123,5 +123,5 @@ max_context_window = 4000
 generate_embeddings = true
 
 [storage]
-search_index_path = "./data/search"
-vector_index_path = "./data/vectors"
+search_index_path = "./.graphiti/data/search"
+vector_index_path = "./.graphiti/data/vectors"

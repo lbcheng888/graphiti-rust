@@ -224,7 +224,26 @@ The Docker setup supports multiple deployment profiles:
 
 For detailed Docker documentation, see [docker/README.md](docker/README.md).
 
+Code Context Integration
+- New crates: `graphiti-context` (library) and `graphiti-context-cli` (CLI) now provide built-in code indexing and search. The previous `claude-context-rust` has been fully merged and removed.
+- CLI examples:
+  - `cargo run -p graphiti-context-cli -- index /path/to/codebase [--force] [--backend qdrant --qdrant-url http://127.0.0.1:6334]`
+  - `cargo run -p graphiti-context-cli -- search /path/to/codebase -q "your query" -k 5`
+  - `cargo run -p graphiti-context-cli -- status /path/to/codebase`
+  - `cargo run -p graphiti-context-cli -- clear /path/to/codebase`
+  - `cargo run -p graphiti-context-cli -- doctor`
+See `docs/claude-context-migration.md` for migration details.
+
 For production hardening and deployment options (Docker/Kubernetes), see [docs/PRODUCTION.md](docs/PRODUCTION.md).
+
+Serena + RA Knowledge Graph
+- Integrated Serena-style tools and rust-analyzer LSP let Graphiti MCP build a precise code knowledge graph.
+- Tool groups (via MCP tools/call):
+  - `serena_*` file/search/edit and project-config helpers
+  - `serena_ra_*` rust-analyzer-backed symbols/references/definition
+  - `serena_kg_*` import symbols as entities and create CONTAINS/REFERENCES/DEFINES edges
+- Data and indexes default to your project `./.graphiti` directory; override with `GRAPHITI_PROJECT` and `GRAPHITI_DATA_DIR` if needed.
+- See `docs/serena-ra-kg.md` for hands-on usage and workflow.
 
 ## API Endpoints
 
@@ -295,7 +314,7 @@ dimension = 4096
 
 [cozo]
 engine = "mem"  # or "sqlite" for persistence
-path = "./data/graphiti.db"
+path = "./.graphiti/data/graphiti.db"
 ```
 
 ### Claude Desktop Integration
@@ -304,10 +323,15 @@ path = "./data/graphiti.db"
   "mcpServers": {
     "graphiti": {
       "command": "/path/to/graphiti-mcp-server",
-      "args": ["--config", "/path/to/config.free.toml"]
+      "args": ["--config", "config.free.toml"]
     }
   }
 }
+
+### Local vs Container Paths
+- Local runs default to the project working directory. Data and indexes sit under `./.graphiti/`.
+- Containerized deployments should mount a volume to `/.graphiti/` or adjust paths in the ConfigMap accordingly.
+- Global MCP configs: if you use a shared client config (e.g., `~/.codex/config.toml`), only add or update the `graphiti-mcp` block and leave other entries intact. Project defaults come from `./.graphiti/config.toml`.
 ```
 
 ## Performance

@@ -3,9 +3,7 @@
 use super::learning::LearningContext;
 use super::learning::LearningDetector;
 use super::learning::NotificationManager;
-use super::AddMemoryRequest;
-use super::AddMemoryResponse;
-use super::GraphitiService;
+use crate::types::{AddMemoryRequest, AddMemoryResponse, GraphitiService};
 use graphiti_core::error::Result as GraphitiResult;
 use std::sync::Arc;
 use tracing::debug;
@@ -140,12 +138,12 @@ impl GraphitiService for LearningAwareGraphitiService {
     // Delegate all other methods to the inner service
     async fn search_memory(
         &self,
-        req: super::SearchMemoryRequest,
-    ) -> GraphitiResult<super::SearchMemoryResponse> {
+        req: crate::types::SearchMemoryRequest,
+    ) -> GraphitiResult<crate::types::SearchMemoryResponse> {
         self.inner.search_memory(req).await
     }
 
-    async fn get_memory(&self, id: Uuid) -> GraphitiResult<Option<super::MemoryNode>> {
+    async fn get_memory(&self, id: Uuid) -> GraphitiResult<Option<crate::types::MemoryNode>> {
         self.inner.get_memory(id).await
     }
 
@@ -153,7 +151,7 @@ impl GraphitiService for LearningAwareGraphitiService {
         &self,
         id: Uuid,
         depth: usize,
-    ) -> GraphitiResult<Vec<super::RelatedMemory>> {
+    ) -> GraphitiResult<Vec<crate::types::RelatedMemory>> {
         self.inner.get_related(id, depth).await
     }
 
@@ -161,7 +159,7 @@ impl GraphitiService for LearningAwareGraphitiService {
         &self,
         query: String,
         limit: Option<usize>,
-    ) -> GraphitiResult<Vec<super::SimpleExtractedRelationship>> {
+    ) -> GraphitiResult<Vec<crate::types::SimpleExtractedRelationship>> {
         self.inner.search_memory_facts(query, limit).await
     }
 
@@ -177,7 +175,7 @@ impl GraphitiService for LearningAwareGraphitiService {
         self.inner.delete_episode(id).await
     }
 
-    async fn get_episodes(&self, last_n: usize) -> GraphitiResult<Vec<super::EpisodeNode>> {
+    async fn get_episodes(&self, last_n: usize) -> GraphitiResult<Vec<graphiti_core::graph::EpisodeNode>> {
         self.inner.get_episodes(last_n).await
     }
 
@@ -198,43 +196,43 @@ impl GraphitiService for LearningAwareGraphitiService {
 
     async fn add_code_entity(
         &self,
-        req: super::AddCodeEntityRequest,
-    ) -> GraphitiResult<super::AddCodeEntityResponse> {
+        req: crate::types::AddCodeEntityRequest,
+    ) -> GraphitiResult<crate::types::AddCodeEntityResponse> {
         self.inner.add_code_entity(req).await
     }
 
     async fn record_activity(
         &self,
-        req: super::RecordActivityRequest,
-    ) -> GraphitiResult<super::RecordActivityResponse> {
+        req: crate::types::RecordActivityRequest,
+    ) -> GraphitiResult<crate::types::RecordActivityResponse> {
         self.inner.record_activity(req).await
     }
 
     async fn search_code(
         &self,
-        req: super::SearchCodeRequest,
-    ) -> GraphitiResult<super::SearchCodeResponse> {
+        req: crate::types::SearchCodeRequest,
+    ) -> GraphitiResult<crate::types::SearchCodeResponse> {
         self.inner.search_code(req).await
     }
 
     async fn batch_add_code_entities(
         &self,
-        req: super::BatchAddCodeEntitiesRequest,
-    ) -> GraphitiResult<super::BatchAddCodeEntitiesResponse> {
+        req: crate::types::BatchAddCodeEntitiesRequest,
+    ) -> GraphitiResult<crate::types::BatchAddCodeEntitiesResponse> {
         self.inner.batch_add_code_entities(req).await
     }
 
     async fn batch_record_activities(
         &self,
-        req: super::BatchRecordActivitiesRequest,
-    ) -> GraphitiResult<super::BatchRecordActivitiesResponse> {
+        req: crate::types::BatchRecordActivitiesRequest,
+    ) -> GraphitiResult<crate::types::BatchRecordActivitiesResponse> {
         self.inner.batch_record_activities(req).await
     }
 
     async fn get_context_suggestions(
         &self,
-        req: super::ContextSuggestionRequest,
-    ) -> GraphitiResult<super::ContextSuggestionResponse> {
+        req: crate::types::ContextSuggestionRequest,
+    ) -> GraphitiResult<crate::types::ContextSuggestionResponse> {
         self.inner.get_context_suggestions(req).await
     }
 }

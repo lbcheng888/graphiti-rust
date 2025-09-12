@@ -47,3 +47,4 @@ test*
 docs/
 .venv
 server.pid
+.cursor

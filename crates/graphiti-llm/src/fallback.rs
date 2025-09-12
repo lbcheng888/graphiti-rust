@@ -2,8 +2,8 @@
 
 use crate::{
     embedder::EmbeddingClient, factory::create_llm_client, CompletionParams, EmbedderClient,
-    EmbedderConfig, EmbeddingProvider, ExtractedEntity, ExtractionResult, LLMClient, LLMConfig,
-    LLMProvider, Message, MultiLLMClient,
+    EmbedderConfig, ExtractedEntity, ExtractionResult, LLMClient, LLMConfig, LLMProvider, Message,
+    MultiLLMClient,
 };
 use async_trait::async_trait;
 use graphiti_core::error::{Error, Result};
@@ -56,7 +56,7 @@ pub struct FallbackLLMClient {
 
 impl FallbackLLMClient {
     /// Create a new fallback LLM client
-    pub async fn new(mut config: FallbackConfig) -> Result<Self> {
+    pub async fn new(config: FallbackConfig) -> Result<Self> {
         if config.llm_providers.is_empty() {
             return Err(Error::Configuration(
                 "At least one LLM provider must be configured".to_string(),
@@ -64,7 +64,7 @@ impl FallbackLLMClient {
         }
 
         // Update configurations from environment
-        for llm_config in &mut config.llm_providers {
+        for llm_config in config.llm_providers.iter_mut() {
             llm_config.from_env();
         }
 

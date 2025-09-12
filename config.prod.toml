@@ -13,7 +13,7 @@ allowed_origins = ["https://your.domain"]
 [cozo]
 # Use a persistent engine for production (sqlite or rocksdb)
 engine = "sqlite"
-path = "./data/graphiti.db"
+path = "./.graphiti/data/graphiti.db"
 options = {}
 
 [llm]
@@ -38,6 +38,5 @@ max_context_window = 4000
 generate_embeddings = true
 
 [storage]
-search_index_path = "./data/search"
-vector_index_path = "./data/vectors"
-
+search_index_path = "./.graphiti/data/search"
+vector_index_path = "./.graphiti/data/vectors"

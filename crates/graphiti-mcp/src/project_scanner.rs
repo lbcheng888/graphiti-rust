@@ -1,9 +1,7 @@
 //! Automatic project source code scanning and knowledge graph generation
 
 use crate::ast_parser::AstParser;
-use crate::AddCodeEntityRequest;
-use crate::AddMemoryRequest;
-use crate::GraphitiService;
+use crate::types::{AddCodeEntityRequest, AddMemoryRequest, GraphitiService};
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -12,6 +10,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
+use tokio::io::AsyncWriteExt;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
@@ -36,6 +35,14 @@ struct ScanCache {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct ScanMarker {
+    /// Unix timestamp (seconds) when the project was last scanned
+    last_scanned_unix: u64,
+    /// Optional cached project name for reference
+    project_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectInfo {
     pub name: String,
     pub root_path: PathBuf,
@@ -53,6 +60,9 @@ pub enum ProjectLanguage {
     TypeScript,
     Java,
     Go,
+    Kotlin,
+    Swift,
+    Nim,
     Mixed(Vec<String>),
 }
 
@@ -103,6 +113,12 @@ impl ProjectScanner {
             "c".to_string(),    // C
             "h".to_string(),    // C/C++ headers
             "hpp".to_string(),  // C++ headers
+            // Added: Kotlin, Swift, Nim
+            "kt".to_string(),   // Kotlin
+            "kts".to_string(),  // Kotlin Script
+            "swift".to_string(),// Swift
+            "nim".to_string(),  // Nim
+            "nims".to_string(), // Nim script
         ]);
 
         Self {
@@ -115,6 +131,146 @@ impl ProjectScanner {
                 project_info: None,
             }),
         }
+    }
+
+    /// Return the path to the persistent scan cache file for a given project root
+    fn cache_file_path(&self, root_path: &Path) -> PathBuf {
+        root_path.join(".graphiti").join("scan-cache.json")
+    }
+
+    /// Try to load the scan marker from disk into memory cache for the given root
+    async fn try_load_scan_marker(&self, root_path: &Path) {
+        let cache_file = self.cache_file_path(root_path);
+        if !cache_file.exists() {
+            return;
+        }
+        match fs::read(&cache_file).await {
+            Ok(bytes) => {
+                match serde_json::from_slice::<ScanMarker>(&bytes) {
+                    Ok(marker) => {
+                        let ts = std::time::UNIX_EPOCH
+                            .checked_add(std::time::Duration::from_secs(marker.last_scanned_unix))
+                            .unwrap_or(std::time::UNIX_EPOCH);
+                        let mut cache = self.scan_cache.write().await;
+                        cache.last_scanned.insert(root_path.to_path_buf(), ts);
+                        if let Some(name) = marker.project_name {
+                            let info = cache
+                                .project_info
+                                .get_or_insert_with(|| ProjectInfo {
+                                    name: name.clone(),
+                                    root_path: root_path.to_path_buf(),
+                                    language: ProjectLanguage::Mixed(vec![]),
+                                    framework: None,
+                                    package_files: vec![],
+                                });
+                            if info.name.is_empty() {
+                                info.name = name;
+                            }
+                        }
+                    }
+                    Err(e) => warn!(
+                        "Failed to parse scan cache {}: {}",
+                        cache_file.display(),
+                        e
+                    ),
+                }
+            }
+            Err(e) => warn!(
+                "Failed to read scan cache {}: {}",
+                cache_file.display(),
+                e
+            ),
+        }
+    }
+
+    /// Persist the scan marker to disk for the given root
+    async fn save_scan_marker(&self, root_path: &Path) {
+        let cache_file = self.cache_file_path(root_path);
+        if let Some(parent) = cache_file.parent() {
+            if let Err(e) = fs::create_dir_all(parent).await {
+                warn!(
+                    "Failed to create .graphiti directory {}: {}",
+                    parent.display(),
+                    e
+                );
+                return;
+            }
+        }
+
+        let (last_scanned_unix, project_name) = {
+            let cache = self.scan_cache.read().await;
+            let ts = cache
+                .last_scanned
+                .get(root_path)
+                .cloned()
+                .unwrap_or_else(std::time::SystemTime::now);
+            let secs = ts
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_else(|_| std::time::Duration::from_secs(0))
+                .as_secs();
+            (secs, cache.project_info.as_ref().map(|p| p.name.clone()))
+        };
+
+        let marker = ScanMarker {
+            last_scanned_unix,
+            project_name,
+        };
+
+        match serde_json::to_vec_pretty(&marker) {
+            Ok(json) => {
+                // Write atomically via temp file then rename
+                let tmp_path = cache_file.with_extension("json.tmp");
+                match fs::File::create(&tmp_path).await {
+                    Ok(mut f) => {
+                        if let Err(e) = f.write_all(&json).await {
+                            warn!("Failed to write scan cache temp file: {}", e);
+                            let _ = fs::remove_file(&tmp_path).await;
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to create scan cache temp file {}: {}", tmp_path.display(), e);
+                        return;
+                    }
+                }
+                if let Err(e) = fs::rename(&tmp_path, &cache_file).await {
+                    warn!(
+                        "Failed to persist scan cache {}: {}",
+                        cache_file.display(),
+                        e
+                    );
+                    let _ = fs::remove_file(&tmp_path).await;
+                }
+            }
+            Err(e) => warn!("Failed to serialize scan cache: {}", e),
+        }
+    }
+
+    /// List source files under root that match supported extensions and skip heavy dirs
+    pub async fn list_source_files(&self, root_path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut files = Vec::new();
+        let mut stack = vec![root_path.to_path_buf()];
+
+        while let Some(dir) = stack.pop() {
+            let mut entries = match tokio::fs::read_dir(&dir).await {
+                Ok(rd) => rd,
+                Err(_) => continue,
+            };
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with('.') || matches!(name.as_str(), "node_modules"|".git"|"target"|"build"|"dist"|"out") {
+                    continue;
+                }
+                if path.is_dir() {
+                    stack.push(path);
+                } else if self.should_scan_file(&path) {
+                    files.push(path);
+                }
+            }
+        }
+
+        Ok(files)
     }
 
     /// Scan entire project from root directory (first-time or full rescan)
@@ -355,8 +511,11 @@ impl ProjectScanner {
             });
         }
 
-        // Fallback: detect by scanning files
-        let languages: Vec<String> = detected_languages.into_iter().collect();
+        // Fallback: detect by scanning files (extensions)
+        let mut languages: Vec<String> = detected_languages.into_iter().collect();
+        if languages.is_empty() {
+            languages = self.detect_languages_from_files(root_path).await?;
+        }
         let language = if languages.len() == 1 {
             match languages[0].as_str() {
                 "Rust" => ProjectLanguage::Rust,
@@ -365,6 +524,9 @@ impl ProjectScanner {
                 "TypeScript" => ProjectLanguage::TypeScript,
                 "Java" => ProjectLanguage::Java,
                 "Go" => ProjectLanguage::Go,
+                "Kotlin" => ProjectLanguage::Kotlin,
+                "Swift" => ProjectLanguage::Swift,
+                "Nim" => ProjectLanguage::Nim,
                 _ => ProjectLanguage::Mixed(languages),
             }
         } else {
@@ -382,6 +544,53 @@ impl ProjectScanner {
             framework,
             package_files,
         })
+    }
+
+    /// Detect project languages by scanning file extensions under root
+    async fn detect_languages_from_files(
+        &self,
+        root_path: &Path,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+
+        // depth-first walk with skip rules; limit total files to avoid heavy work
+        let mut stack: Vec<PathBuf> = vec![root_path.to_path_buf()];
+        let mut visited_files: usize = 0;
+        const FILE_LIMIT: usize = 5000; // safety cap
+
+        while let Some(dir) = stack.pop() {
+            let mut rd = match fs::read_dir(&dir).await {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            while let Ok(Some(entry)) = rd.next_entry().await {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if matches!(
+                            name,
+                            "node_modules" | "target" | ".git" | "build" | "dist" | "__pycache__" | ".venv" | "venv"
+                        ) {
+                            continue;
+                        }
+                    }
+                    stack.push(path);
+                } else {
+                    visited_files += 1;
+                    if visited_files > FILE_LIMIT { break; }
+                    if let Some(lang) = self.detect_file_language(&path) {
+                        *counts.entry(lang).or_insert(0) += 1;
+                    }
+                }
+            }
+            if visited_files > FILE_LIMIT { break; }
+        }
+
+        let mut langs: Vec<(String, usize)> = counts.into_iter().collect();
+        // sort by frequency desc
+        langs.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(langs.into_iter().map(|(k, _)| k).collect())
     }
 
     /// Recursively scan directory for source files
@@ -708,28 +917,36 @@ impl ProjectScanner {
             "c" => Some("C".to_string()),
             "h" => Some("C/C++ Header".to_string()),
             "hpp" => Some("C++ Header".to_string()),
+            // Added languages
+            "kt" | "kts" => Some("Kotlin".to_string()),
+            "swift" => Some("Swift".to_string()),
+            "nim" | "nims" => Some("Nim".to_string()),
             _ => None,
         }
     }
 
     /// Check if project directory needs scanning (based on cache)
     pub async fn needs_scan(&self, root_path: &Path) -> bool {
-        let cache = self.scan_cache.read().await;
-
-        // Always scan if never scanned before
-        if !cache.last_scanned.contains_key(root_path) {
-            return true;
+        // Opportunistically load from disk cache if not present in memory
+        {
+            let cache = self.scan_cache.read().await;
+            if !cache.last_scanned.contains_key(root_path) {
+                drop(cache);
+                self.try_load_scan_marker(root_path).await;
+            }
         }
 
-        // Check if significant time has passed
+        let cache = self.scan_cache.read().await;
         if let Some(last_scan) = cache.last_scanned.get(root_path) {
             if let Ok(elapsed) = last_scan.elapsed() {
                 // Rescan every 24 hours
                 return elapsed.as_secs() > 24 * 3600;
             }
+            false
+        } else {
+            // No record found even after load, need scan
+            true
         }
-
-        false
     }
 
     /// Mark directory as scanned
@@ -738,5 +955,8 @@ impl ProjectScanner {
         cache
             .last_scanned
             .insert(root_path.to_path_buf(), std::time::SystemTime::now());
+        drop(cache);
+        // Persist to disk (best-effort)
+        self.save_scan_marker(root_path).await;
     }
 }

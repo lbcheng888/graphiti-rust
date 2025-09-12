@@ -167,6 +167,10 @@ For **stdio transport** (recommended):
 }
 ```
 
+Global MCP client configuration
+- If you maintain a global MCP client config (for example `~/.codex/config.toml`), only add or update the `graphiti-mcp` server entry and keep other entries intact.
+- Prefer project-local defaults: Graphiti uses `./.graphiti/config.toml` and stores data under `./.graphiti/data/*` when `GRAPHITI_PROJECT` is not provided.
+
 For **SSE transport** (requires mcp-remote):
 
 ```json

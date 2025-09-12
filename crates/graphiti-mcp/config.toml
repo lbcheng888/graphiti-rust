@@ -17,12 +17,13 @@ temperature = 0.7
 max_retries = 3
 
 [embedder]
-provider = "qwencandle"
+provider = "embed_anything"
 api_key = ""
 model = "Qwen/Qwen3-Embedding-0.6B"
-dimension = 1536
+dimension = 1024
 batch_size = 32
 timeout = 120
+cache_dir = "./.graphiti/models/Qwen3-Embedding-0.6B"
 
 [graphiti]
 name = "graphiti-mcp"

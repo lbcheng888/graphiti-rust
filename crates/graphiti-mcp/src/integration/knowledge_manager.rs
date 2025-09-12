@@ -2,8 +2,7 @@
 
 use super::hooks::ImplicitAction;
 use super::*;
-use crate::AddCodeEntityRequest;
-use crate::AddMemoryRequest;
+use crate::types::{AddCodeEntityRequest, AddMemoryRequest};
 use crate::RecordActivityRequest;
 use crate::SearchCodeRequest;
 use std::collections::VecDeque;

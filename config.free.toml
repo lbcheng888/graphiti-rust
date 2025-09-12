@@ -19,13 +19,15 @@ model = "disabled"
 
 [embedder]
 provider = "embed_anything"
-model = "google/embeddinggemma-300m"
-dimension = 768
+model = "Qwen/Qwen3-Embedding-0.6B"
+dimension = 1024
 batch_size = 32
 timeout = 120
 api_key = ""
 device = "auto"
 max_length = 8192
+# 指定本地模型缓存目录（离线可用）
+cache_dir = "./.graphiti/models/Qwen3-Embedding-0.6B"
 
 [graphiti]
 name = "free"
@@ -37,5 +39,5 @@ generate_embeddings = true
 skip_entity_extraction = true
 
 [storage]
-search_index_path = "./data/search"
-vector_index_path = "./data/vectors"
+search_index_path = "./.graphiti/data/search"
+vector_index_path = "./.graphiti/data/vectors"

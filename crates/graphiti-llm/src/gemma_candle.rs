@@ -68,6 +68,7 @@ impl GemmaCandleClient {
         Ok(Self { tokenizer, cfg })
     }
 
+    #[allow(dead_code)]
     fn adjust_dim(mut v: Vec<f32>, target: usize) -> Vec<f32> {
         if v.len() > target {
             v.truncate(target);

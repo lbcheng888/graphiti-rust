@@ -1,8 +1,7 @@
 //! Tool hooks for intercepting Claude Code operations
 
 use super::*;
-use crate::AddCodeEntityRequest;
-use crate::AddMemoryRequest;
+use crate::types::{AddCodeEntityRequest, AddMemoryRequest};
 use crate::RecordActivityRequest;
 use async_trait::async_trait;
 use serde_json::Value;
