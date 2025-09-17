@@ -1,37 +1,40 @@
 //! Server startup and HTTP/TLS configuration
-use crate::types::ServerConfig;
-use crate::handlers::mcp::mcp_handler;
 use crate::handlers::http::*;
+use crate::handlers::mcp::mcp_handler;
+use crate::learning::LearningConfig;
+use crate::learning::{
+    ConsoleNotificationChannel, LearningDetector, LearningNotification, MCPNotificationChannel,
+    NotificationManager, SmartLearningDetector,
+};
 use crate::learning_endpoints::*;
 use crate::middleware::auth::auth_guard;
 use crate::middleware::rate_limit::rate_limit_guard;
+use crate::project_scanner::ProjectScanner;
+use crate::services::graphiti::RealGraphitiService;
 use crate::types::AppState;
+use crate::types::GraphitiService;
+use crate::types::ServerConfig;
+use crate::types::ServerConfig as FullServerConfig;
 use crate::utils::build_cors_layer;
 use axum::middleware;
 use axum::routing::get;
 use axum::routing::post;
 use axum::Router;
 use axum_server::tls_rustls::RustlsConfig;
+use graphiti_llm::LLMConfig;
+use metrics_exporter_prometheus::PrometheusHandle;
+use once_cell::sync::OnceCell;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::sync::broadcast;
+use tower::limit::GlobalConcurrencyLimitLayer;
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::DefaultMakeSpan;
 use tower_http::trace::TraceLayer;
-use tower::limit::GlobalConcurrencyLimitLayer;
-use tower_http::limit::RequestBodyLimitLayer;
 use tracing::info;
-use crate::learning::{LearningDetector, SmartLearningDetector, NotificationManager, ConsoleNotificationChannel, MCPNotificationChannel, LearningNotification};
-use crate::services::graphiti::RealGraphitiService;
-use crate::types::GraphitiService;
-use graphiti_llm::LLMConfig;
-use crate::types::ServerConfig as FullServerConfig;
-use tokio::sync::broadcast;
-use crate::project_scanner::ProjectScanner;
-use crate::learning::LearningConfig;
-use once_cell::sync::OnceCell;
-use metrics_exporter_prometheus::PrometheusHandle;
 
 /// Build the main application router
 pub fn build_router(state: AppState) -> Router {
@@ -70,10 +73,7 @@ pub fn build_router(state: AppState) -> Router {
 }
 
 /// Start HTTP server (non-TLS)
-pub async fn start_http_server(
-    addr: SocketAddr,
-    app: Router,
-) -> anyhow::Result<()> {
+pub async fn start_http_server(addr: SocketAddr, app: Router) -> anyhow::Result<()> {
     info!("Starting MCP server on {}", addr);
     let listener = TcpListener::bind(&addr).await?;
     let server = axum::serve(listener, app);
@@ -123,7 +123,8 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let terminate = async {
         use tokio::signal::unix::{signal, SignalKind};
-        let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
         sigterm.recv().await;
     };
 
@@ -168,18 +169,25 @@ pub async fn initialize_services(
 
     // Initialize learning
     let learning_cfg = LearningConfig::default();
-    let detector: Arc<dyn LearningDetector> = Arc::new(SmartLearningDetector::new(learning_cfg.detector));
+    let detector: Arc<dyn LearningDetector> =
+        Arc::new(SmartLearningDetector::new(learning_cfg.detector));
     let notification_manager = Arc::new(NotificationManager::new(learning_cfg.notifications));
     let (mcp_channel, notification_receiver) = MCPNotificationChannel::new();
-    notification_manager.add_channel(Box::new(mcp_channel)).await;
-    notification_manager.add_channel(Box::new(ConsoleNotificationChannel)).await;
+    notification_manager
+        .add_channel(Box::new(mcp_channel))
+        .await;
+    notification_manager
+        .add_channel(Box::new(ConsoleNotificationChannel))
+        .await;
 
     // Wrap service with learning
-    let learning_aware_service = Arc::new(crate::learning_integration::LearningAwareGraphitiService::new(
-        Arc::new(base_service),
-        detector.clone(),
-        notification_manager.clone(),
-    ));
+    let learning_aware_service = Arc::new(
+        crate::learning_integration::LearningAwareGraphitiService::new(
+            Arc::new(base_service),
+            detector.clone(),
+            notification_manager.clone(),
+        ),
+    );
 
     // Project scanner
     let project_scanner = Arc::new(ProjectScanner::new(
@@ -201,7 +209,9 @@ static METRICS_EXPORTER: OnceCell<PrometheusHandle> = OnceCell::new();
 
 pub fn init_metrics() -> anyhow::Result<()> {
     use metrics_exporter_prometheus::PrometheusBuilder;
-    if METRICS_EXPORTER.get().is_some() { return Ok(()); }
+    if METRICS_EXPORTER.get().is_some() {
+        return Ok(());
+    }
     let handle = PrometheusBuilder::new()
         .install_recorder()
         .map_err(|e| anyhow::anyhow!("{}", e))?;

@@ -125,14 +125,18 @@ impl EmbedAnythingClient {
         {
             self.ensure_loaded().await?;
             let guard = self.embedder.read().await;
-            let embedder = guard.as_ref().ok_or_else(|| Error::EmbeddingProvider("Embedder not loaded".to_string()))?;
+            let embedder = guard
+                .as_ref()
+                .ok_or_else(|| Error::EmbeddingProvider("Embedder not loaded".to_string()))?;
             let texts: Vec<&str> = vec![text];
-            let embedding = embed_query(&texts, embedder, None)
-                .await
-                .map_err(|e| Error::EmbeddingProvider(format!("Embedding generation failed: {}", e)))?;
+            let embedding = embed_query(&texts, embedder, None).await.map_err(|e| {
+                Error::EmbeddingProvider(format!("Embedding generation failed: {}", e))
+            })?;
 
             if embedding.is_empty() {
-                return Err(Error::EmbeddingProvider("No embeddings generated".to_string()));
+                return Err(Error::EmbeddingProvider(
+                    "No embeddings generated".to_string(),
+                ));
             }
 
             match &embedding[0].embedding {
@@ -142,7 +146,7 @@ impl EmbedAnythingClient {
                         adjust_dim_in_place(&mut out, td);
                     }
                     Ok(out)
-                },
+                }
                 _ => Err(Error::EmbeddingProvider(
                     "Unexpected embedding result type".to_string(),
                 )),
@@ -162,15 +166,18 @@ impl EmbedAnythingClient {
         {
             self.ensure_loaded().await?;
             let guard = self.embedder.read().await;
-            let embedder = guard.as_ref().ok_or_else(|| Error::EmbeddingProvider("Embedder not loaded".to_string()))?;
+            let embedder = guard
+                .as_ref()
+                .ok_or_else(|| Error::EmbeddingProvider("Embedder not loaded".to_string()))?;
             if texts.is_empty() {
                 return Ok(Vec::new());
             }
 
             let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-            let embeddings: Vec<EmbedData> = embed_query(&refs, embedder, None)
-                .await
-                .map_err(|e| Error::EmbeddingProvider(format!("Batch embedding generation failed: {}", e)))?;
+            let embeddings: Vec<EmbedData> =
+                embed_query(&refs, embedder, None).await.map_err(|e| {
+                    Error::EmbeddingProvider(format!("Batch embedding generation failed: {}", e))
+                })?;
 
             let mut result: Vec<Vec<f32>> = Vec::new();
             for embed_data in embeddings {
@@ -180,7 +187,7 @@ impl EmbedAnythingClient {
                             adjust_dim_in_place(&mut vec, td);
                         }
                         result.push(vec)
-                    },
+                    }
                     _ => {
                         return Err(Error::EmbeddingProvider(
                             "Unexpected embedding result type in batch".to_string(),

@@ -4,7 +4,6 @@ use graphiti_core::error::Result;
 use std::sync::Arc;
 
 use crate::EmbedderClient;
-use crate::{GemmaCandleClient, GemmaCandleConfig};
 use crate::EmbedderConfig;
 use crate::EmbeddingClient;
 use crate::LLMClient;
@@ -12,6 +11,7 @@ use crate::OllamaClient;
 use crate::OllamaConfig;
 use crate::OpenAIClient;
 use crate::OpenAIConfig;
+use crate::{GemmaCandleClient, GemmaCandleConfig};
 // Qwen-specific paths removed; use Generic embedder only
 
 /// Configuration for the service factory

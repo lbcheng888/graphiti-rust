@@ -94,4 +94,3 @@ pub fn chunk_file(text: &str, rel_path: &str) -> Vec<(String, usize, usize, Stri
     }
     out
 }
-

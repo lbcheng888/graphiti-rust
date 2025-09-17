@@ -56,7 +56,7 @@ pub struct FallbackLLMClient {
 
 impl FallbackLLMClient {
     /// Create a new fallback LLM client
-    pub async fn new(config: FallbackConfig) -> Result<Self> {
+    pub async fn new(mut config: FallbackConfig) -> Result<Self> {
         if config.llm_providers.is_empty() {
             return Err(Error::Configuration(
                 "At least one LLM provider must be configured".to_string(),
@@ -382,7 +382,7 @@ pub struct FallbackEmbeddingClient {
 
 impl FallbackEmbeddingClient {
     /// Create a new fallback embedding client
-    pub async fn new(mut config: FallbackConfig) -> Result<Self> {
+    pub async fn new(config: FallbackConfig) -> Result<Self> {
         if config.embedding_providers.is_empty() {
             return Err(Error::Configuration(
                 "At least one embedding provider must be configured".to_string(),

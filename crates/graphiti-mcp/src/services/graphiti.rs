@@ -1,18 +1,18 @@
 //! Graphiti service implementation
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use std::collections::HashMap;
-use uuid::Uuid;
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use graphiti_core::code_entities::*;
-use graphiti_core::graph::*;
 use graphiti_core::error::Result as GraphitiResult;
+use graphiti_core::graph::*;
 use graphiti_core::graphiti::GraphitiConfig;
-use graphiti_llm::*;
-use graphiti_cozo::CozoDriver;
 use graphiti_core::storage::GraphStorage;
+use graphiti_cozo::CozoDriver;
+use graphiti_llm::*;
 use std::collections::HashMap as StdHashMap;
 
 use crate::types::*;
@@ -63,14 +63,22 @@ impl RealGraphitiService {
                     Ok(client) => Arc::new(client),
                     Err(e) => {
                         warn!("EmbedAnything initialization failed: {}. Using disabled placeholder embedder.", e);
-                        struct DisabledEmbedder { dim: usize }
+                        struct DisabledEmbedder {
+                            dim: usize,
+                        }
                         #[async_trait::async_trait]
                         impl graphiti_llm::EmbeddingClient for DisabledEmbedder {
-                            async fn embed_batch(&self, texts: &[String]) -> graphiti_core::error::Result<Vec<Vec<f32>>> {
+                            async fn embed_batch(
+                                &self,
+                                texts: &[String],
+                            ) -> graphiti_core::error::Result<Vec<Vec<f32>>>
+                            {
                                 Ok(texts.iter().map(|_| vec![0.0; self.dim]).collect())
                             }
                         }
-                        Arc::new(DisabledEmbedder { dim: embedder_config.dimension.max(128) })
+                        Arc::new(DisabledEmbedder {
+                            dim: embedder_config.dimension.max(128),
+                        })
                     }
                 }
             }
@@ -87,7 +95,10 @@ impl RealGraphitiService {
             struct ArcEmbedder(std::sync::Arc<dyn EmbeddingClient>);
             #[async_trait::async_trait]
             impl EmbeddingClient for ArcEmbedder {
-                async fn embed_batch(&self, texts: &[String]) -> graphiti_core::error::Result<Vec<Vec<f32>>> {
+                async fn embed_batch(
+                    &self,
+                    texts: &[String],
+                ) -> graphiti_core::error::Result<Vec<Vec<f32>>> {
                     self.0.embed_batch(texts).await
                 }
             }
@@ -108,7 +119,10 @@ impl RealGraphitiService {
             match graphiti_ner::HybridExtractor::new_with_candle(config, Some(candle_ner)).await {
                 Ok(hybrid) => Arc::new(hybrid),
                 Err(e) => {
-                    warn!("Failed to initialize Candle NER extractor: {}, falling back to rule-based", e);
+                    warn!(
+                        "Failed to initialize Candle NER extractor: {}, falling back to rule-based",
+                        e
+                    );
                     Arc::new(graphiti_ner::RuleBasedExtractor::default())
                 }
             }
@@ -214,7 +228,10 @@ impl RealGraphitiService {
 #[async_trait::async_trait]
 impl GraphitiService for RealGraphitiService {
     async fn add_memory(&self, req: AddMemoryRequest) -> GraphitiResult<AddMemoryResponse> {
-        info!("Adding memory: {:?}", req.name.as_deref().unwrap_or("unnamed"));
+        info!(
+            "Adding memory: {:?}",
+            req.name.as_deref().unwrap_or("unnamed")
+        );
 
         // Create episode using the storage layer directly
         let episode_id = Uuid::new_v4();
@@ -366,7 +383,11 @@ impl GraphitiService for RealGraphitiService {
             })
             .collect();
 
-        info!("Search completed, found {} results ({} returned)", total, results.len());
+        info!(
+            "Search completed, found {} results ({} returned)",
+            total,
+            results.len()
+        );
 
         Ok(crate::types::SearchMemoryResponse { results, total })
     }
@@ -491,12 +512,24 @@ impl GraphitiService for RealGraphitiService {
             "entity_type": cet.to_string(),
             "description": req.description,
         });
-        if let Some(fp) = &req.file_path { props["file_path"] = serde_json::json!(fp); }
-        if let Some((s,e)) = req.line_range { props["line_range"] = serde_json::json!([s,e]); }
-        if let Some(lang) = &req.language { props["language"] = serde_json::json!(lang); }
-        if let Some(fw) = &req.framework { props["framework"] = serde_json::json!(fw); }
-        if let Some(c) = req.complexity { props["complexity"] = serde_json::json!(c); }
-        if let Some(i) = req.importance { props["importance"] = serde_json::json!(i); }
+        if let Some(fp) = &req.file_path {
+            props["file_path"] = serde_json::json!(fp);
+        }
+        if let Some((s, e)) = req.line_range {
+            props["line_range"] = serde_json::json!([s, e]);
+        }
+        if let Some(lang) = &req.language {
+            props["language"] = serde_json::json!(lang);
+        }
+        if let Some(fw) = &req.framework {
+            props["framework"] = serde_json::json!(fw);
+        }
+        if let Some(c) = req.complexity {
+            props["complexity"] = serde_json::json!(c);
+        }
+        if let Some(i) = req.importance {
+            props["importance"] = serde_json::json!(i);
+        }
 
         let node = EntityNode {
             id: entity_id,
@@ -504,11 +537,19 @@ impl GraphitiService for RealGraphitiService {
             entity_type: cet.to_string(),
             labels: vec!["CodeEntity".into()],
             properties: props,
-            temporal: TemporalMetadata { created_at: now, valid_from: now, valid_to: None, expired_at: None },
+            temporal: TemporalMetadata {
+                created_at: now,
+                valid_from: now,
+                valid_to: None,
+                expired_at: None,
+            },
             embedding: None,
         };
         self.storage.create_node(&node).await?;
-        Ok(AddCodeEntityResponse { id: entity_id, message: "ok".into() })
+        Ok(AddCodeEntityResponse {
+            id: entity_id,
+            message: "ok".into(),
+        })
     }
 
     async fn record_activity(
@@ -520,11 +561,7 @@ impl GraphitiService for RealGraphitiService {
         let now = chrono::Utc::now();
         let content = format!(
             "Activity [{}] {}\n{}\nDeveloper: {} | Project: {}",
-            req.activity_type,
-            req.title,
-            req.description,
-            req.developer,
-            req.project
+            req.activity_type, req.title, req.description, req.developer, req.project
         );
         let ep = EpisodeNode {
             id,
@@ -532,11 +569,19 @@ impl GraphitiService for RealGraphitiService {
             episode_type: EpisodeType::Event,
             content,
             source: "activity".into(),
-            temporal: TemporalMetadata { created_at: now, valid_from: now, valid_to: None, expired_at: None },
+            temporal: TemporalMetadata {
+                created_at: now,
+                valid_from: now,
+                valid_to: None,
+                expired_at: None,
+            },
             embedding: None,
         };
         self.storage.create_node(&ep).await?;
-        Ok(RecordActivityResponse { id, message: "ok".into() })
+        Ok(RecordActivityResponse {
+            id,
+            message: "ok".into(),
+        })
     }
 
     async fn search_code(&self, req: SearchCodeRequest) -> GraphitiResult<SearchCodeResponse> {
@@ -545,11 +590,27 @@ impl GraphitiService for RealGraphitiService {
         let mut out: Vec<graphiti_core::code_entities::CodeEntity> = Vec::new();
         for n in nodes {
             let props = n.properties();
-            if !props.get("code_entity").and_then(|v| v.as_bool()).unwrap_or(false) { continue; }
-            if let Some(q) = &req.query.strip_prefix("") { let _ = q; }
+            if !props
+                .get("code_entity")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if let Some(q) = &req.query.strip_prefix("") {
+                let _ = q;
+            }
             // Match query over name/description
-            let name = props.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let desc = props.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = props
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let desc = props
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let mut ok = true;
             if !req.query.is_empty() {
                 let ql = req.query.to_lowercase();
@@ -557,15 +618,43 @@ impl GraphitiService for RealGraphitiService {
             }
             if ok {
                 let id = *n.id();
-                let file_path = props.get("file_path").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let line_range = props.get("line_range").and_then(|v| v.as_array()).and_then(|a|
-                    if a.len()==2 { Some((a[0].as_u64().unwrap_or(1) as u32, a[1].as_u64().unwrap_or(1) as u32)) } else { None }
-                );
-                let language = props.get("language").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let framework = props.get("framework").and_then(|v| v.as_str()).map(|s| s.to_string());
-                let complexity = props.get("complexity").and_then(|v| v.as_u64()).map(|u| u as u8);
-                let importance = props.get("importance").and_then(|v| v.as_u64()).map(|u| u as u8);
-                let entity_type_str = props.get("entity_type").and_then(|v| v.as_str()).unwrap_or("Function");
+                let file_path = props
+                    .get("file_path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let line_range = props
+                    .get("line_range")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| {
+                        if a.len() == 2 {
+                            Some((
+                                a[0].as_u64().unwrap_or(1) as u32,
+                                a[1].as_u64().unwrap_or(1) as u32,
+                            ))
+                        } else {
+                            None
+                        }
+                    });
+                let language = props
+                    .get("language")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let framework = props
+                    .get("framework")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let complexity = props
+                    .get("complexity")
+                    .and_then(|v| v.as_u64())
+                    .map(|u| u as u8);
+                let importance = props
+                    .get("importance")
+                    .and_then(|v| v.as_u64())
+                    .map(|u| u as u8);
+                let entity_type_str = props
+                    .get("entity_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Function");
                 let entity_type = match entity_type_str.to_lowercase().as_str() {
                     "class" => CodeEntityType::Class,
                     "module" => CodeEntityType::Module,
@@ -588,15 +677,32 @@ impl GraphitiService for RealGraphitiService {
                     metadata: StdHashMap::new(),
                 };
                 // Filters
-                if let Some(et) = &req.entity_type { if et.to_lowercase()!=entity_type_str.to_lowercase() { continue; } }
-                if let Some(langf) = &req.language { if ce.language.as_deref().unwrap_or("").to_lowercase()!=langf.to_lowercase() { continue; } }
-                if let Some(fw) = &req.framework { if ce.framework.as_deref().unwrap_or("").to_lowercase()!=fw.to_lowercase() { continue; } }
+                if let Some(et) = &req.entity_type {
+                    if et.to_lowercase() != entity_type_str.to_lowercase() {
+                        continue;
+                    }
+                }
+                if let Some(langf) = &req.language {
+                    if ce.language.as_deref().unwrap_or("").to_lowercase() != langf.to_lowercase() {
+                        continue;
+                    }
+                }
+                if let Some(fw) = &req.framework {
+                    if ce.framework.as_deref().unwrap_or("").to_lowercase() != fw.to_lowercase() {
+                        continue;
+                    }
+                }
                 out.push(ce);
             }
         }
         let total = out.len();
-        if let Some(l) = req.limit { out.truncate(l as usize); }
-        Ok(SearchCodeResponse { results: out, total })
+        if let Some(l) = req.limit {
+            out.truncate(l as usize);
+        }
+        Ok(SearchCodeResponse {
+            results: out,
+            total,
+        })
     }
 
     async fn batch_add_code_entities(
@@ -608,11 +714,19 @@ impl GraphitiService for RealGraphitiService {
         let mut ok = 0usize;
         for e in req.entities {
             match self.add_code_entity(e).await {
-                Ok(r) => { results.push(r); ok+=1; }
+                Ok(r) => {
+                    results.push(r);
+                    ok += 1;
+                }
                 Err(e) => errors.push(format!("{}", e)),
             }
         }
-        Ok(BatchAddCodeEntitiesResponse { results, successful_count: ok, failed_count: errors.len(), errors })
+        Ok(BatchAddCodeEntitiesResponse {
+            results,
+            successful_count: ok,
+            failed_count: errors.len(),
+            errors,
+        })
     }
 
     async fn batch_record_activities(
@@ -624,11 +738,19 @@ impl GraphitiService for RealGraphitiService {
         let mut ok = 0usize;
         for a in req.activities {
             match self.record_activity(a).await {
-                Ok(r) => { results.push(r); ok+=1; }
+                Ok(r) => {
+                    results.push(r);
+                    ok += 1;
+                }
                 Err(e) => errors.push(format!("{}", e)),
             }
         }
-        Ok(BatchRecordActivitiesResponse { results, successful_count: ok, failed_count: errors.len(), errors })
+        Ok(BatchRecordActivitiesResponse {
+            results,
+            successful_count: ok,
+            failed_count: errors.len(),
+            errors,
+        })
     }
 
     async fn get_context_suggestions(

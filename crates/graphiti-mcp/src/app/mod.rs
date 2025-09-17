@@ -1,9 +1,9 @@
 //! Graphiti MCP Server - Main Entry Point
 
 use crate::config::{init_tracing, load_config};
-use crate::types::*;
-use crate::server::{build_router, start_http_server, start_https_server, initialize_services};
+use crate::server::{build_router, initialize_services, start_http_server, start_https_server};
 use crate::types::AppState;
+use crate::types::*;
 
 use axum::extract::State;
 use axum::response::Json;
@@ -25,8 +25,8 @@ use tracing::warn;
 // Note: We keep local implementations here to avoid large refactor collisions.
 // keep local handlers in this file for now to avoid refactor churn
 // NonZeroU32 is not used; remove import to silence warning
-use std::sync::Arc as StdArc;
 use std::num::NonZeroU32;
+use std::sync::Arc as StdArc;
 // metrics middleware removed for compatibility; keep exporter via init_metrics
 use metrics::{counter, histogram};
 
@@ -168,12 +168,50 @@ pub fn legacy_main() -> anyhow::Result<()> {
             let mut reader = BufReader::new(stdin);
             use tokio::sync::Semaphore;
 
-            // None => auto-detect; Some(true) => NDJSON; Some(false) => LSP (Content-Length)
-            let mut use_ndjson: Option<bool> = match std::env::var("GRAPHITI_STDIN_FRAMING").ok().as_deref() {
+            // Determine preferred framing before emitting readiness notification so clients can parse it correctly.
+            let framing_pref = match std::env::var("GRAPHITI_STDIN_FRAMING").ok().as_deref() {
                 Some("ndjson") | Some("NDJSON") => Some(true),
                 Some("lsp") | Some("LSP") => Some(false),
                 _ => None,
             };
+
+            // Emit MCP readiness notification so clients know we're alive before sending requests.
+            let ready_notification = serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/ready",
+                "params": {
+                    "protocolVersion": "2024-11-05"
+                }
+            });
+            let ready_json = serde_json::to_string(&ready_notification)
+                .unwrap_or_else(|_| "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/ready\"}".to_string());
+
+            if matches!(framing_pref, Some(true)) {
+                // Explicit NDJSON framing: emit plain JSON line.
+                if let Err(err) = stdout.write_all(ready_json.as_bytes()).await {
+                    eprintln!("Failed to send MCP ready notification: {}", err);
+                } else if let Err(err) = stdout.write_all(b"\n").await {
+                    eprintln!("Failed to terminate MCP ready notification line: {}", err);
+                } else if let Err(err) = stdout.flush().await {
+                    eprintln!("Failed to flush MCP ready notification: {}", err);
+                }
+            } else {
+                // Default to LSP framing for compatibility with clients expecting Content-Length headers.
+                let header = format!(
+                    "Content-Length: {}\r\nContent-Type: application/json; charset=utf-8\r\n\r\n",
+                    ready_json.as_bytes().len()
+                );
+                if let Err(err) = stdout.write_all(header.as_bytes()).await {
+                    eprintln!("Failed to send MCP ready header: {}", err);
+                } else if let Err(err) = stdout.write_all(ready_json.as_bytes()).await {
+                    eprintln!("Failed to send MCP ready payload: {}", err);
+                } else if let Err(err) = stdout.flush().await {
+                    eprintln!("Failed to flush MCP ready notification: {}", err);
+                }
+            }
+
+            // None => auto-detect; Some(true) => NDJSON; Some(false) => LSP (Content-Length)
+            let mut use_ndjson: Option<bool> = framing_pref;
 
             // Concurrency guard for stdio processing
             let stdio_sema = Arc::new(Semaphore::new(config.server.max_connections));

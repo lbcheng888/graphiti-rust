@@ -114,11 +114,11 @@ impl ProjectScanner {
             "h".to_string(),    // C/C++ headers
             "hpp".to_string(),  // C++ headers
             // Added: Kotlin, Swift, Nim
-            "kt".to_string(),   // Kotlin
-            "kts".to_string(),  // Kotlin Script
-            "swift".to_string(),// Swift
-            "nim".to_string(),  // Nim
-            "nims".to_string(), // Nim script
+            "kt".to_string(),    // Kotlin
+            "kts".to_string(),   // Kotlin Script
+            "swift".to_string(), // Swift
+            "nim".to_string(),   // Nim
+            "nims".to_string(),  // Nim script
         ]);
 
         Self {
@@ -145,41 +145,29 @@ impl ProjectScanner {
             return;
         }
         match fs::read(&cache_file).await {
-            Ok(bytes) => {
-                match serde_json::from_slice::<ScanMarker>(&bytes) {
-                    Ok(marker) => {
-                        let ts = std::time::UNIX_EPOCH
-                            .checked_add(std::time::Duration::from_secs(marker.last_scanned_unix))
-                            .unwrap_or(std::time::UNIX_EPOCH);
-                        let mut cache = self.scan_cache.write().await;
-                        cache.last_scanned.insert(root_path.to_path_buf(), ts);
-                        if let Some(name) = marker.project_name {
-                            let info = cache
-                                .project_info
-                                .get_or_insert_with(|| ProjectInfo {
-                                    name: name.clone(),
-                                    root_path: root_path.to_path_buf(),
-                                    language: ProjectLanguage::Mixed(vec![]),
-                                    framework: None,
-                                    package_files: vec![],
-                                });
-                            if info.name.is_empty() {
-                                info.name = name;
-                            }
+            Ok(bytes) => match serde_json::from_slice::<ScanMarker>(&bytes) {
+                Ok(marker) => {
+                    let ts = std::time::UNIX_EPOCH
+                        .checked_add(std::time::Duration::from_secs(marker.last_scanned_unix))
+                        .unwrap_or(std::time::UNIX_EPOCH);
+                    let mut cache = self.scan_cache.write().await;
+                    cache.last_scanned.insert(root_path.to_path_buf(), ts);
+                    if let Some(name) = marker.project_name {
+                        let info = cache.project_info.get_or_insert_with(|| ProjectInfo {
+                            name: name.clone(),
+                            root_path: root_path.to_path_buf(),
+                            language: ProjectLanguage::Mixed(vec![]),
+                            framework: None,
+                            package_files: vec![],
+                        });
+                        if info.name.is_empty() {
+                            info.name = name;
                         }
                     }
-                    Err(e) => warn!(
-                        "Failed to parse scan cache {}: {}",
-                        cache_file.display(),
-                        e
-                    ),
                 }
-            }
-            Err(e) => warn!(
-                "Failed to read scan cache {}: {}",
-                cache_file.display(),
-                e
-            ),
+                Err(e) => warn!("Failed to parse scan cache {}: {}", cache_file.display(), e),
+            },
+            Err(e) => warn!("Failed to read scan cache {}: {}", cache_file.display(), e),
         }
     }
 
@@ -229,7 +217,11 @@ impl ProjectScanner {
                         }
                     }
                     Err(e) => {
-                        warn!("Failed to create scan cache temp file {}: {}", tmp_path.display(), e);
+                        warn!(
+                            "Failed to create scan cache temp file {}: {}",
+                            tmp_path.display(),
+                            e
+                        );
                         return;
                     }
                 }
@@ -247,7 +239,10 @@ impl ProjectScanner {
     }
 
     /// List source files under root that match supported extensions and skip heavy dirs
-    pub async fn list_source_files(&self, root_path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn list_source_files(
+        &self,
+        root_path: &Path,
+    ) -> Result<Vec<PathBuf>, Box<dyn std::error::Error + Send + Sync>> {
         let mut files = Vec::new();
         let mut stack = vec![root_path.to_path_buf()];
 
@@ -259,7 +254,12 @@ impl ProjectScanner {
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with('.') || matches!(name.as_str(), "node_modules"|".git"|"target"|"build"|"dist"|"out") {
+                if name.starts_with('.')
+                    || matches!(
+                        name.as_str(),
+                        "node_modules" | ".git" | "target" | "build" | "dist" | "out"
+                    )
+                {
                     continue;
                 }
                 if path.is_dir() {
@@ -570,7 +570,14 @@ impl ProjectScanner {
                     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                         if matches!(
                             name,
-                            "node_modules" | "target" | ".git" | "build" | "dist" | "__pycache__" | ".venv" | "venv"
+                            "node_modules"
+                                | "target"
+                                | ".git"
+                                | "build"
+                                | "dist"
+                                | "__pycache__"
+                                | ".venv"
+                                | "venv"
                         ) {
                             continue;
                         }
@@ -578,13 +585,17 @@ impl ProjectScanner {
                     stack.push(path);
                 } else {
                     visited_files += 1;
-                    if visited_files > FILE_LIMIT { break; }
+                    if visited_files > FILE_LIMIT {
+                        break;
+                    }
                     if let Some(lang) = self.detect_file_language(&path) {
                         *counts.entry(lang).or_insert(0) += 1;
                     }
                 }
             }
-            if visited_files > FILE_LIMIT { break; }
+            if visited_files > FILE_LIMIT {
+                break;
+            }
         }
 
         let mut langs: Vec<(String, usize)> = counts.into_iter().collect();

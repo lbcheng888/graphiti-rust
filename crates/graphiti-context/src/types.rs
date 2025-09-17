@@ -12,8 +12,17 @@ pub struct CodeChunk {
 }
 
 #[derive(Debug, Clone)]
-pub enum ProgressPhase { Preparing, Scanning, Indexing, Completed }
+pub enum ProgressPhase {
+    Preparing,
+    Scanning,
+    Indexing,
+    Completed,
+}
 
 #[derive(Debug, Clone)]
-pub struct IndexProgress { pub phase: ProgressPhase, pub current: usize, pub total: usize, pub percentage: u64 }
-
+pub struct IndexProgress {
+    pub phase: ProgressPhase,
+    pub current: usize,
+    pub total: usize,
+    pub percentage: u64,
+}

@@ -5,7 +5,12 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
-#[command(name = "graphiti-context", version, about = "Graphiti code indexer & search", author)]
+#[command(
+    name = "graphiti-context",
+    version,
+    about = "Graphiti code indexer & search",
+    author
+)]
 struct Cli {
     /// Backend: auto|local|qdrant
     #[arg(long, value_parser = ["auto", "local", "qdrant"], default_value = "auto")]
@@ -19,11 +24,28 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    Index { path: PathBuf, #[arg(long)] force: bool },
-    Search { path: PathBuf, #[arg(short, long)] query: String, #[arg(short = 'k', long, default_value_t = 5)] top_k: usize },
-    Status { path: PathBuf },
-    Clear { path: PathBuf },
-    Doctor { #[arg(long)] path: Option<PathBuf> },
+    Index {
+        path: PathBuf,
+        #[arg(long)]
+        force: bool,
+    },
+    Search {
+        path: PathBuf,
+        #[arg(short, long)]
+        query: String,
+        #[arg(short = 'k', long, default_value_t = 5)]
+        top_k: usize,
+    },
+    Status {
+        path: PathBuf,
+    },
+    Clear {
+        path: PathBuf,
+    },
+    Doctor {
+        #[arg(long)]
+        path: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -46,21 +68,38 @@ fn build_config(cli: &Cli) -> Result<ContextConfig> {
         "qdrant" => true,
         _ => std::env::var("QDRANT_URL").is_ok(),
     };
-    if let Some(url) = &cli.qdrant_url { cfg.qdrant_url = Some(url.clone()); cfg.use_qdrant = true; }
+    if let Some(url) = &cli.qdrant_url {
+        cfg.qdrant_url = Some(url.clone());
+        cfg.use_qdrant = true;
+    }
     Ok(cfg)
 }
 
 fn cmd_index_with(path: &PathBuf, force: bool, cfg: ContextConfig) -> Result<()> {
     let ctx = Context::new(Some(cfg))?;
     let pb = ProgressBar::new(100);
-    pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos:>3}% {msg}")?.progress_chars("##-"));
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} [{elapsed_precise}] {bar:40.cyan/blue} {pos:>3}% {msg}",
+        )?
+        .progress_chars("##-"),
+    );
 
-    let (files, chunks) = ctx.index_codebase(path, Some(|p: graphiti_context::types::IndexProgress| {
-        use graphiti_context::types::ProgressPhase::*;
-        let (msg, pct) = match p.phase { Preparing => ("Preparing collection...", p.percentage), Scanning => ("Scanning files...", p.percentage), Indexing => ("Indexing files...", p.percentage), Completed => ("Index completed", 100) };
-        pb.set_position(pct);
-        pb.set_message(msg);
-    }), force)?;
+    let (files, chunks) = ctx.index_codebase(
+        path,
+        Some(|p: graphiti_context::types::IndexProgress| {
+            use graphiti_context::types::ProgressPhase::*;
+            let (msg, pct) = match p.phase {
+                Preparing => ("Preparing collection...", p.percentage),
+                Scanning => ("Scanning files...", p.percentage),
+                Indexing => ("Indexing files...", p.percentage),
+                Completed => ("Index completed", 100),
+            };
+            pb.set_position(pct);
+            pb.set_message(msg);
+        }),
+        force,
+    )?;
     pb.finish_with_message("Done");
     println!("Indexed {} files, {} chunks", files, chunks);
     Ok(())
@@ -69,9 +108,20 @@ fn cmd_index_with(path: &PathBuf, force: bool, cfg: ContextConfig) -> Result<()>
 fn cmd_search_with(path: &PathBuf, query: &str, top_k: usize, cfg: ContextConfig) -> Result<()> {
     let ctx = Context::new(Some(cfg))?;
     let results = ctx.search(path, query, top_k)?;
-    if results.is_empty() { println!("No results"); return Ok(()); }
+    if results.is_empty() {
+        println!("No results");
+        return Ok(());
+    }
     for (i, r) in results.iter().enumerate() {
-        println!("{}. {}:{}-{}  score={:.2}\n{}\n---", i + 1, r.relative_path, r.start_line, r.end_line, r.score, trim(&r.content));
+        println!(
+            "{}. {}:{}-{}  score={:.2}\n{}\n---",
+            i + 1,
+            r.relative_path,
+            r.start_line,
+            r.end_line,
+            r.score,
+            trim(&r.content)
+        );
     }
     Ok(())
 }
@@ -96,7 +146,11 @@ fn cmd_clear_with(path: &PathBuf, cfg: ContextConfig) -> Result<()> {
 
 fn trim(s: &str) -> String {
     let s = s.trim();
-    if s.len() > 500 { format!("{}...", &s[..500]) } else { s.to_string() }
+    if s.len() > 500 {
+        format!("{}...", &s[..500])
+    } else {
+        s.to_string()
+    }
 }
 
 fn cmd_doctor(path: Option<PathBuf>, cfg: ContextConfig) -> Result<()> {
@@ -107,10 +161,14 @@ fn cmd_doctor(path: Option<PathBuf>, cfg: ContextConfig) -> Result<()> {
     if ctx.is_qdrant_enabled() {
         let name = ctx.collection_name(&test_path);
         let ok = ctx.has_index(&test_path).unwrap_or(false);
-        println!("Qdrant: enabled at {:?} — collection '{}' exists: {}", std::env::var("QDRANT_URL").ok(), name, ok);
+        println!(
+            "Qdrant: enabled at {:?} — collection '{}' exists: {}",
+            std::env::var("QDRANT_URL").ok(),
+            name,
+            ok
+        );
     } else {
         println!("Backend: local JSONL (fallback)");
     }
     Ok(())
 }
-

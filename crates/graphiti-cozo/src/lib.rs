@@ -759,7 +759,9 @@ impl GraphStorage for CozoDriver {
             .fetch_optional(&* self.pool)
             .await
             .map_err(|e| Error::Storage(format!("pre-check duplicate edge failed: {}", e)))?;
-            if row_opt.is_some() { return Ok(()); }
+            if row_opt.is_some() {
+                return Ok(());
+            }
         }
 
         let (created_at, valid_from, valid_to, expired_at) =
@@ -795,7 +797,9 @@ impl GraphStorage for CozoDriver {
                     .fetch_optional(&* self.pool)
                     .await
                     .map_err(|e| Error::Storage(format!("pre-check duplicate edge in-tx failed: {}", e)))?;
-                    if row_opt.is_some() { return Ok(()); }
+                    if row_opt.is_some() {
+                        return Ok(());
+                    }
                 }
                 sqlx::query("INSERT INTO edges(id,source_id,target_id,relationship,properties,created_at,valid_from,valid_to,expired_at,weight) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source_id=excluded.source_id,target_id=excluded.target_id,relationship=excluded.relationship,properties=excluded.properties,created_at=excluded.created_at,valid_from=excluded.valid_from,valid_to=excluded.valid_to,expired_at=excluded.expired_at,weight=excluded.weight")
                     .bind(edge.id.to_string())

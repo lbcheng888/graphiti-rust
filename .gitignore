@@ -48,3 +48,4 @@ docs/
 .venv
 server.pid
 .cursor
+AGENTS.md

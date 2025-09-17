@@ -10,14 +10,19 @@ pub struct Chunker {
 
 impl Default for Chunker {
     fn default() -> Self {
-        Self { max_lines: 200, overlap: 30 }
+        Self {
+            max_lines: 200,
+            overlap: 30,
+        }
     }
 }
 
 impl Chunker {
     pub fn chunk(&self, content: &str, abs_path: &Path, rel_path: &str) -> Vec<CodeChunk> {
         let lines: Vec<&str> = content.split_inclusive('\n').collect();
-        if lines.is_empty() { return vec![]; }
+        if lines.is_empty() {
+            return vec![];
+        }
         let mut chunks = Vec::new();
         let mut start = 0usize;
         while start < lines.len() {
@@ -26,11 +31,29 @@ impl Chunker {
             let start_line = start as u32 + 1;
             let end_line = end as u32;
             let id = chunk_id(rel_path, start_line, end_line, piece);
-            let language = language_from_extension(abs_path.extension().and_then(|s| s.to_str()).unwrap_or(""));
-            let file_extension = abs_path.extension().and_then(|s| s.to_str()).map(|s| format!(".{}", s)).unwrap_or_default();
-            chunks.push(CodeChunk { id, content: piece.clone(), relative_path: rel_path.to_string(), start_line, end_line, file_extension, language: language.to_string() });
-            if end == lines.len() { break; }
-            if self.overlap >= end { break; }
+            let language = language_from_extension(
+                abs_path.extension().and_then(|s| s.to_str()).unwrap_or(""),
+            );
+            let file_extension = abs_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| format!(".{}", s))
+                .unwrap_or_default();
+            chunks.push(CodeChunk {
+                id,
+                content: piece.clone(),
+                relative_path: rel_path.to_string(),
+                start_line,
+                end_line,
+                file_extension,
+                language: language.to_string(),
+            });
+            if end == lines.len() {
+                break;
+            }
+            if self.overlap >= end {
+                break;
+            }
             start = end - self.overlap;
         }
         chunks
@@ -72,4 +95,3 @@ fn language_from_extension(ext: &str) -> &'static str {
         _ => "text",
     }
 }
-

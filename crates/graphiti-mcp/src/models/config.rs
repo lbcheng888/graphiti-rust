@@ -109,9 +109,21 @@ pub struct ServerConfig {
 }
 
 // Defaults for new server settings
-const fn default_max_connections() -> usize { 100 }
-const fn default_requests_per_second() -> u32 { 50 }
-const fn default_request_timeout_seconds() -> u64 { 30 }
-const fn default_request_body_limit_bytes() -> usize { 1 * 1024 * 1024 }
-const fn default_buffer_capacity() -> usize { 1024 }
-const fn default_require_auth() -> bool { true }
+const fn default_max_connections() -> usize {
+    100
+}
+const fn default_requests_per_second() -> u32 {
+    50
+}
+const fn default_request_timeout_seconds() -> u64 {
+    30
+}
+const fn default_request_body_limit_bytes() -> usize {
+    1 * 1024 * 1024
+}
+const fn default_buffer_capacity() -> usize {
+    1024
+}
+const fn default_require_auth() -> bool {
+    true
+}

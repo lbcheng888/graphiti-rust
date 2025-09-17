@@ -175,7 +175,10 @@ impl GraphitiService for LearningAwareGraphitiService {
         self.inner.delete_episode(id).await
     }
 
-    async fn get_episodes(&self, last_n: usize) -> GraphitiResult<Vec<graphiti_core::graph::EpisodeNode>> {
+    async fn get_episodes(
+        &self,
+        last_n: usize,
+    ) -> GraphitiResult<Vec<graphiti_core::graph::EpisodeNode>> {
         self.inner.get_episodes(last_n).await
     }
 

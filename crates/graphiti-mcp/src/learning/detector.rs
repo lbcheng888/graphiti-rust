@@ -5,7 +5,9 @@ use super::LearningResult;
 use super::events::LearningContext;
 use super::events::LearningEvent;
 use super::events::LearningEventType;
-use crate::types::{AddMemoryRequest, AddMemoryResponse, SimpleExtractedEntity, SimpleExtractedRelationship};
+use crate::types::{
+    AddMemoryRequest, AddMemoryResponse, SimpleExtractedEntity, SimpleExtractedRelationship,
+};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::collections::HashSet;

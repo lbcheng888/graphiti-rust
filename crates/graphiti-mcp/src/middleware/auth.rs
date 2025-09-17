@@ -1,10 +1,10 @@
 //! Authentication middleware
 
+use axum::body::Body;
+use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::extract::State;
-use axum::body::Body;
 
 /// Authentication guard middleware
 pub async fn auth_guard(

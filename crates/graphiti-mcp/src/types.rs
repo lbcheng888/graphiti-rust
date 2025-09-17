@@ -11,7 +11,7 @@ pub struct Args {
     pub host: String,
 
     /// Configuration file path (relative to project working directory)
-    #[arg(short, long, default_value = "config.toml")]
+    #[arg(short, long, default_value = "graphiti-server.toml")]
     pub config: PathBuf,
 
     /// Log level
@@ -551,28 +551,44 @@ pub struct SimpleExtractedRelationship {
     pub confidence: f32,
 }
 // Defaults for new server settings
-const fn default_max_connections() -> usize { 100 }
-const fn default_requests_per_second() -> u32 { 50 }
-const fn default_request_timeout_seconds() -> u64 { 30 }
-const fn default_request_body_limit_bytes() -> usize { 1 * 1024 * 1024 }
-const fn default_buffer_capacity() -> usize { 1024 }
-const fn default_require_auth() -> bool { true }
+const fn default_max_connections() -> usize {
+    100
+}
+const fn default_requests_per_second() -> u32 {
+    50
+}
+const fn default_request_timeout_seconds() -> u64 {
+    30
+}
+const fn default_request_body_limit_bytes() -> usize {
+    1 * 1024 * 1024
+}
+const fn default_buffer_capacity() -> usize {
+    1024
+}
+const fn default_require_auth() -> bool {
+    true
+}
 
+use crate::learning::{LearningDetector, LearningNotification, NotificationManager};
+use crate::project_scanner::ProjectScanner;
 use clap::Parser;
-use serde::{Serialize, Deserialize};
-use uuid::Uuid;
+use governor::{
+    clock::DefaultClock,
+    state::{direct::NotKeyed, InMemoryState},
+    RateLimiter,
+};
+use graphiti_core::code_entities::CodeEntity;
+use graphiti_core::error::Result as GraphitiResult;
+use graphiti_core::graph::EpisodeNode;
+use graphiti_core::graphiti::GraphitiConfig;
+use graphiti_cozo::CozoConfig as CoreCozoConfig;
+use graphiti_llm::{EmbedderConfig, LLMConfig, LLMProvider};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc as StdArc;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use governor::{RateLimiter, clock::DefaultClock, state::{InMemoryState, direct::NotKeyed}};
-use graphiti_core::error::Result as GraphitiResult;
-use graphiti_core::graph::EpisodeNode;
-use graphiti_core::code_entities::CodeEntity;
-use graphiti_core::graphiti::GraphitiConfig;
-use graphiti_llm::{EmbedderConfig, LLMConfig, LLMProvider};
-use graphiti_cozo::CozoConfig as CoreCozoConfig;
-use crate::learning::{LearningDetector, NotificationManager, LearningNotification};
-use crate::project_scanner::ProjectScanner;
+use uuid::Uuid;
 
 pub type Limiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;

@@ -2,4 +2,3 @@
 fn main() -> anyhow::Result<()> {
     graphiti_mcp::run()
 }
-

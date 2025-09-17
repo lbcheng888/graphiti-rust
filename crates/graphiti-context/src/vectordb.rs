@@ -30,4 +30,3 @@ pub trait VectorDatabase: Send + Sync {
     fn search(&self, name: &str, vector: &[f32], top_k: usize) -> Result<Vec<VectorHit>>;
     fn delete_by_relative_paths(&self, name: &str, rel_paths: &[String]) -> Result<()>;
 }
-

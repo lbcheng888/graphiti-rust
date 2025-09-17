@@ -1,7 +1,7 @@
 //! Learning notification endpoints for MCP server
 
-use crate::types::AppState;
 use crate::handlers::mcp::mcp_handler;
+use crate::types::AppState;
 use crate::types::{AddMemoryRequest, SearchMemoryRequest};
 // 使用统一的类型定义，避免与 models::* 产生歧义
 // （本文件并未直接使用这些请求类型，去除不必要导入）

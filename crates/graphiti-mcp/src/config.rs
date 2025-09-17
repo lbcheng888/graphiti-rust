@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
+use crate::types::{Args, ServerConfig};
 /// Initialize tracing
-use tracing::{info, debug};
+use tracing::{debug, info};
 use tracing_subscriber::prelude::__tracing_subscriber_SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use crate::types::{Args, ServerConfig};
 
 pub(crate) fn init_tracing(level: &str) -> anyhow::Result<()> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -68,7 +68,10 @@ pub(crate) fn resolve_config_path(args: &Args) -> anyhow::Result<PathBuf> {
 
     let provided_path = expand_home(&args.config);
     let explicit_force = std::env::var("GRAPHITI_CONFIG_FORCE").ok().as_deref() == Some("1");
-    let is_explicit = provided_path.file_name().map(|n| n != "config.toml").unwrap_or(true);
+    let is_explicit = provided_path
+        .file_name()
+        .map(|n| n != "graphiti-server.toml")
+        .unwrap_or(true);
 
     // 1) Explicit --config path takes precedence
     if explicit_force || is_explicit {
@@ -98,7 +101,7 @@ pub(crate) fn resolve_config_path(args: &Args) -> anyhow::Result<PathBuf> {
             .map_err(|e| anyhow::anyhow!("Failed to get current directory: {}", e))?
     };
 
-    let project_config = project_dir.join(".graphiti").join("config.toml");
+    let project_config = project_dir.join(".graphiti").join("graphiti-server.toml");
     if project_config.exists() {
         info!(
             "Using project-specific config: {}",
@@ -148,7 +151,10 @@ pub(crate) fn resolve_config_path(args: &Args) -> anyhow::Result<PathBuf> {
 }
 
 /// Apply project-specific configuration overrides
-pub(crate) fn apply_project_overrides(config: &mut ServerConfig, args: &Args) -> anyhow::Result<()> {
+pub(crate) fn apply_project_overrides(
+    config: &mut ServerConfig,
+    args: &Args,
+) -> anyhow::Result<()> {
     use std::fs::OpenOptions;
 
     // Override database path if specified
@@ -168,7 +174,9 @@ pub(crate) fn apply_project_overrides(config: &mut ServerConfig, args: &Args) ->
                 .write(true)
                 .create(true)
                 .open(&db_path_buf)
-                .map_err(|e| anyhow::anyhow!("Failed to create DB file {}: {}", db_path_buf.display(), e))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to create DB file {}: {}", db_path_buf.display(), e)
+                })?;
         }
     } else {
         // Determine the project directory (similar to Serena's --project)
@@ -197,7 +205,9 @@ pub(crate) fn apply_project_overrides(config: &mut ServerConfig, args: &Args) ->
                 .write(true)
                 .create(true)
                 .open(&project_db)
-                .map_err(|e| anyhow::anyhow!("Failed to create DB file {}: {}", project_db.display(), e))?;
+                .map_err(|e| {
+                    anyhow::anyhow!("Failed to create DB file {}: {}", project_db.display(), e)
+                })?;
         }
 
         config.cozo.path = project_db.to_string_lossy().to_string();
@@ -239,18 +249,24 @@ temperature = 0.7
 max_tokens = 2048
 
 [embedder]
-provider = "local"  # use lightweight default to avoid heavy model downloads
-model = "text-embedding-3-small"
-device = "auto"
+provider = "embed_anything"  # default to local embed-anything backend
+api_key = ""
+model = "Qwen/Qwen3-Embedding-0.6B"
+dimension = 1024
 batch_size = 32
+timeout = 120
+device = "auto"
+max_length = 8192
+cache_dir = "./.graphiti/models/Qwen3-Embedding-0.6B"
 
 [graphiti]
-max_episode_length = 1000
-max_memories_per_search = 50
-similarity_threshold = 0.7
-learning_enabled = true
-auto_scan_enabled = true
-scan_interval_minutes = 30
+name = "default"
+enable_deduplication = true
+min_entity_confidence = 0.7
+min_relationship_confidence = 0.6
+max_context_window = 4000
+generate_embeddings = true
+skip_entity_extraction = false
 "#;
 
     std::fs::write(config_path, default_config)

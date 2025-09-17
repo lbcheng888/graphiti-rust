@@ -1,9 +1,9 @@
 //! HTTP endpoint handlers
 
+use crate::types::*;
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use axum::extract::{State, Query, Path};
-use crate::types::*;
 use tracing::error;
 use uuid::Uuid;
 

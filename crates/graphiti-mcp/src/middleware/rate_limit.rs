@@ -1,10 +1,10 @@
 //! Rate limiting middleware
 
+use axum::body::Body;
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
-use axum::extract::State;
-use axum::body::Body;
 
 /// Rate limit guard middleware
 pub async fn rate_limit_guard(
